@@ -318,13 +318,17 @@ static const char *volt_names[] = {
 
 
 // Current calibration state for mode 0..6
-static config_t default_config;
+static config_t set1_config;
+static config_t set2_config;
 
 // Current configuration
-static config_t *config = &default_config;
+static config_t *config = &set1_config;
 
 // OSD message buffer
-static char message[80];
+static char message[256];
+
+// phase text buffer
+static char phase_text[256];
 
 // Aggregate calibration metrics (i.e. errors summed across all channels)
 static int sum_metrics[RANGE_MAX];
@@ -353,6 +357,21 @@ static int supports_mux            = 1; /* mux moved from pin to register bit */
 static int invert = 0;
 static int supports_analog = 0;
 
+static int modeset = 0;
+
+int yuv_divider_lookup[] = { 6, 8, 10, 12, 14, 16, 3, 4 };
+
+static const char *yuv_divider_names[] = {
+   "x6",
+   "x8",
+   "x10",
+   "x12",
+   "x14",
+   "x16",
+   "x3",
+   "x4"
+};
+
 // =============================================================
 // Param definitions for OSD
 // =============================================================
@@ -368,7 +387,7 @@ enum {
        F_OFFSET,
        HALF,
        DIVIDER,
-       RANGE,
+   RANGE,
    DELAY,
    FILTER_L,
    SUB_C,
@@ -426,6 +445,11 @@ static const char *coupling_names[] = {
    "AC With Clamp"
 };
 
+static const char *range_names[] = {
+   "Auto",
+   "90/270 Degrees"
+};
+
 enum {
    YUV_INPUT_HI,
    YUV_INPUT_TERM,
@@ -453,19 +477,25 @@ enum {
    NUM_CLAMPTYPE
 };
 
+enum {
+   RANGE_180,
+   RANGE_90,
+   NUM_RANGE
+};
+
 static param_t params[] = {
    {  CPLD_SETUP_MODE,  "Setup Mode", "setup_mode", 0, NUM_CPLD_SETUP-1, 1 },
    { ALL_OFFSETS,      "Sampling Phase",          "offset", 0,  15, 1 },
 //block of hidden RGB options for file compatibility
-   {    A_OFFSET,    "A Phase",    "a_offset", 0,   0, 1 },
-   {    B_OFFSET,    "B Phase",    "b_offset", 0,   0, 1 },
-   {    C_OFFSET,    "C Phase",    "c_offset", 0,   0, 1 },
-   {    D_OFFSET,    "D Phase",    "d_offset", 0,   0, 1 },
-   {    E_OFFSET,    "E Phase",    "e_offset", 0,   0, 1 },
-   {    F_OFFSET,    "F Phase",    "f_offset", 0,   0, 1 },
+   {    A_OFFSET,    "A Phase",    "a_offset", 0,   15, 1 },
+   {    B_OFFSET,    "B Phase",    "b_offset", 0,   15, 1 },
+   {    C_OFFSET,    "C Phase",    "c_offset", 0,   15, 1 },
+   {    D_OFFSET,    "D Phase",    "d_offset", 0,   15, 1 },
+   {    E_OFFSET,    "E Phase",    "e_offset", 0,   15, 1 },
+   {    F_OFFSET,    "F Phase",    "f_offset", 0,   15, 1 },
    {        HALF,        "Half Pixel Shift",        "half", 0,   1, 1 },
    {     DIVIDER,    "Clock Multiplier",    "multiplier", 0,   7, 1 },
-   {       RANGE,    "Multiplier Range",    "range", 0,   1, 1 },
+   {       RANGE,    "Calibration Range",   "range", 0, NUM_RANGE-1, 1 },
 //end of hidden block
    {       DELAY,  "Pixel H Offset",            "delay", 0,  15, 1 },
    {    FILTER_L,  "Filter Y",      "l_filter", 0,   1, 1 },
@@ -565,8 +595,12 @@ static void sendDAC(int dac, int value)
         }
         RPI_SetGpioValue(STROBE_PIN, 1);
     } else if (new_DAC_detected() == 2) {
-        int packet = (dac + 1) | (value << 6);
-        //log_info("bu2506 dac:%d = %02X, %03X", dac, value, packet);
+        int value_10bit = value << 2;
+        if (value_10bit >= 2) {
+            value_10bit -= 2;
+        }
+        int packet = (dac + 1) | (value_10bit << 4);
+        //log_info("bu2506 dac:%d = %03X, %03X", dac, value_10bit, packet);
         RPI_SetGpioValue(STROBE_PIN, 0);
 
         for (int i = 0; i < 14; i++) {
@@ -646,7 +680,7 @@ static void write_config(config_t *config, int dac_update) {
       scan_len++;
    }
    if (supports_edge) {
-      sp |= config->edge << scan_len;
+      sp |= (config->edge & 1) << scan_len;
       scan_len++;
    }
    if (supports_clamptype) {
@@ -792,7 +826,6 @@ static void cpld_init(int version) {
    params[F_OFFSET].hidden = 1;
    params[HALF].hidden = 1;
    params[DIVIDER].hidden = 1;
-   params[RANGE].hidden = 1;
    cpld_version = version;
    config->all_offsets = 0;
    config->sp_offset[0] = 0;
@@ -908,7 +941,7 @@ static void cpld_calibrate(capture_info_t *capinfo, int elk) {
       config->sp_offset[4] = value;
       config->sp_offset[5] = value;
       write_config(config, DAC_UPDATE);
-      metric = diff_N_frames(capinfo, NUM_CAL_FRAMES, 0, elk);
+      metric = diff_N_frames(capinfo, NUM_CAL_FRAMES, elk);
       log_info("INFO: value = %d: metric = %d", value, metric);
       sum_metrics[value] = metric;
       osd_sp(config, 2, metric);
@@ -917,18 +950,41 @@ static void cpld_calibrate(capture_info_t *capinfo, int elk) {
       }
    }
 
-   // Use a 3 sample window to find the minimum and maximum
    min_win_metric = INT_MAX;
+   //first seatch for noisiest sample phase
+   int max_metric = 0;
+   int max_i = 0;
    for (int i = 0; i < range; i++) {
-      int left  = (i - 1 + range) % range;
-      int right = (i + 1 + range) % range;
-      win_metric = sum_metrics[left] + sum_metrics[i] + sum_metrics[right];
-      if (sum_metrics[i] == min_metric) {
-         if (win_metric < min_win_metric) {
-            min_win_metric = win_metric;
-            min_i = i;
-         }
+      if (sum_metrics[i] > max_metric) {
+         max_metric = sum_metrics[i];
+         max_i = i;
       }
+   }
+   if (config->range == RANGE_180) {  // always use 180 degrees in mode 7 as no option to switch to 90
+       min_i = (max_i + (range >> 1)) % range;   //180 degrees from worst
+   } else {
+       min_i = (max_i + (range >> 2)) % range;   //90 degrees from worst
+       if (sum_metrics[(min_i - 1 + range) % range] + sum_metrics[min_i] + sum_metrics[(min_i + 1 + range) % range] != 0) {
+           min_i = (max_i + (range >> 1) + (range >> 2)) % range;   //270 degrees from worst
+       }
+   }
+
+   min_win_metric = sum_metrics[(min_i - 1 + range) % range] + sum_metrics[min_i] + sum_metrics[(min_i + 1 + range) % range]; // is this a good sample point?
+
+   if (min_win_metric != 0) {     // if 90  / 180 approach didn't find a zero sample window at 90 or 180, scan whole range for best window
+       // Use a 3 sample window to find the minimum and maximum
+       min_win_metric = INT_MAX;
+       for (int i = 0; i < range; i++) {
+          int left  = (i - 1 + range) % range;
+          int right = (i + 1 + range) % range;
+          win_metric = sum_metrics[left] + sum_metrics[i] + sum_metrics[right];
+          if (sum_metrics[i] == min_metric) {
+             if (win_metric < min_win_metric) {
+                min_win_metric = win_metric;
+                min_i = i;
+             }
+          }
+       }
    }
 
    // In all modes, start with the min metric
@@ -945,13 +1001,19 @@ static void cpld_calibrate(capture_info_t *capinfo, int elk) {
 
    // Perform a final test of errors
    log_info("Performing final test");
-   errors = diff_N_frames(capinfo, NUM_CAL_FRAMES, 0, elk);
+   errors = diff_N_frames(capinfo, NUM_CAL_FRAMES, elk);
    osd_sp(config, 2, errors);
    log_sp(config);
    log_info("Calibration complete, errors = %d", errors);
 }
 
 static void cpld_set_mode(int mode) {
+   modeset = mode;
+   if (modeset == MODE_SET1) {
+       config = &set1_config;
+   } else {
+       config = &set2_config;
+   }
    write_config(config, DAC_UPDATE);
 }
 
@@ -974,7 +1036,6 @@ static int cpld_analyse(int selected_sync_state, int analyse) {
          } else {
             log_info("Analyze Csync: polarity changed to non-inverted");
          }
-         write_config(config, DAC_UPDATE);
       } else {
          if (invert) {
             log_info("Analyze Csync: polarity unchanged (inverted)");
@@ -982,6 +1043,7 @@ static int cpld_analyse(int selected_sync_state, int analyse) {
             log_info("Analyze Csync: polarity unchanged (non-inverted)");
          }
       }
+      write_config(config, DAC_UPDATE);
       int polarity = selected_sync_state;
       if (analyse) {
           polarity = analyse_sync();
@@ -1012,7 +1074,11 @@ static void cpld_update_capture_info(capture_info_t *capinfo) {
       // Update the sample width
       capinfo->sample_width = SAMPLE_WIDTH_6;
       // Update the line capture function
-      capinfo->capture_line = capture_line_normal_6bpp_table;
+      if (get_parameter(F_YUV_PIXEL_DOUBLE) == 0) {
+             capinfo->capture_line = capture_line_normal_6bpp_table;
+      } else {
+             capinfo->capture_line = capture_line_normal_odd_even_6bpp_table;
+      }
    }
    write_config(config, DAC_UPDATE);
 }
@@ -1079,7 +1145,10 @@ static int cpld_get_value(int num) {
    case HALF:
       return config->half_px_delay;
    case DIVIDER:
+      config->divider = 1; //fixed at x8
       return config->divider;
+   case RANGE:
+      return config->range;
 
    }
    return 0;
@@ -1088,6 +1157,9 @@ static int cpld_get_value(int num) {
 static const char *cpld_get_value_string(int num) {
    if (num == EDGE) {
       return edge_names[config->edge];
+   }
+   if (num == DIVIDER) {
+      return yuv_divider_names[config->divider];
    }
    if (num == RATE) {
       if ((cpld_version & 0xff) >= 0x82) {
@@ -1110,6 +1182,18 @@ static const char *cpld_get_value_string(int num) {
    if (num >= DAC_A && num <= DAC_H) {
       return volt_names[cpld_get_value(num)];
    }
+   if (num >= ALL_OFFSETS && num <= F_OFFSET) {
+      if (config->sub_c != 0) {
+          sprintf(phase_text, "%d (%d Degrees)", cpld_get_value(num), cpld_get_value(num) * 180 / yuv_divider_lookup[config->divider]);
+      } else {
+          sprintf(phase_text, "%d (%d Degrees)", cpld_get_value(num), cpld_get_value(num) * 360 / yuv_divider_lookup[config->divider]);
+      }
+      return phase_text;
+   }
+   if (num == RANGE) {
+      return range_names[config->range];
+   }
+
    return NULL;
 }
 
@@ -1117,7 +1201,7 @@ static void cpld_set_value(int num, int value) {
    if (value < params[num].min) {
       value = params[num].min;
    }
-   if (value > params[num].max) {
+   if (value > params[num].max  && (num < ALL_OFFSETS || num > F_OFFSET)) { //don't clip offsets because the max value could change after the values are written when loading a new profile if the divider is different
       value = params[num].max;
    }
    switch (num) {
@@ -1128,15 +1212,12 @@ static void cpld_set_value(int num, int value) {
       break;
    case ALL_OFFSETS:
       config->all_offsets = value;
-      config->all_offsets &= getRange() - 1;
       config->sp_offset[0] = config->all_offsets;
       config->sp_offset[1] = config->all_offsets;
       config->sp_offset[2] = config->all_offsets;
       config->sp_offset[3] = config->all_offsets;
       config->sp_offset[4] = config->all_offsets;
       config->sp_offset[5] = config->all_offsets;
-      // Keep offset in the legal range (which depends on config->sub_c)
-
       break;
    case RATE:
       config->rate = value;
@@ -1208,7 +1289,8 @@ static void cpld_set_value(int num, int value) {
    case SUB_C:
       config->sub_c = value;
       // Keep offset in the legal range (which depends on config->sub_c)
-      config->all_offsets &= getRange() - 1;
+      params[ALL_OFFSETS].max = getRange() - 1;
+      config->all_offsets &= (getRange() - 1);
       config->sp_offset[0] = config->all_offsets;
       config->sp_offset[1] = config->all_offsets;
       config->sp_offset[2] = config->all_offsets;
@@ -1252,9 +1334,11 @@ static void cpld_set_value(int num, int value) {
       config->half_px_delay = value;
       break;
    case DIVIDER:
-      config->divider = value;
+      config->divider = 1;       // fixed at x8
       break;
-
+   case RANGE:
+      config->range = value;
+      break;
    }
    write_config(config, DAC_UPDATE);
 }
@@ -1291,7 +1375,7 @@ static int cpld_old_firmware_support() {
 }
 
 static int cpld_get_divider() {
-    return 8;                        // not sure of value for atom cpld
+    return yuv_divider_lookup[config->divider];
 }
 
 static int cpld_get_delay() {
@@ -1347,7 +1431,14 @@ static void cpld_init_ttl(int value) {
 
 cpld_t cpld_yuv_analog = {
    .name = "6-12_BIT_YUV_Analog",
-   .default_profile = "Acorn_Atom",
+   .nameBBC = "3-12_BIT_BBC_Analog",
+   .nameRGB = "6-12_BIT_RGB_Analog",
+   .nameYUV = "6-12_BIT_YUV_Analog",
+   .nameprefix = "YUV",
+   .nameBBCprefix = "BBC",
+   .nameRGBprefix = "RGB",
+   .nameYUVprefix = "YUV",
+   .default_profile = "Apple_/Apple_II_",
    .init = cpld_init_analog,
    .get_version = cpld_get_version,
    .calibrate = cpld_calibrate,
@@ -1369,10 +1460,16 @@ cpld_t cpld_yuv_analog = {
    .show_cal_details = cpld_show_cal_details
 };
 
-
 cpld_t cpld_yuv_ttl = {
    .name = "6-12_BIT_YUV",
-   .default_profile = "Apple_IIc_TTL",
+   .nameBBC = "3-12_BIT_BBC",
+   .nameRGB = "6-12_BIT_RGB",
+   .nameYUV = "6-12_BIT_YUV",
+   .nameprefix = "YUV",
+   .nameBBCprefix = "BBC",
+   .nameRGBprefix = "RGB",
+   .nameYUVprefix = "YUV",
+   .default_profile = "Apple/Apple_IIc_TTL",
    .init = cpld_init_ttl,
    .get_version = cpld_get_version,
    .calibrate = cpld_calibrate,

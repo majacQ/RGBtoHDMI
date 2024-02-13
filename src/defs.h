@@ -3,6 +3,29 @@
 #ifndef DEFS_H
 #define DEFS_H
 
+#define _RPI  1
+#define _RPI2 2
+#define _RPI3 3
+#define _RPI4 4
+
+#ifdef USE_ARM_CAPTURE
+    #ifdef RPI4                                  // if using ARM CAPTURE then enable mode7 options only on RPI4 build
+    #define USE_ALT_M7DEINTERLACE_CODE           // uses re-ordered code for mode7 deinterlace
+    #define USE_CACHED_SCREEN                    // caches the upper half of the screen area and uses it for mode7 deinterlace
+    #define CACHED_SCREEN_OFFSET    0x00B00000   // offset to cached screen area
+    #define CACHED_SCREEN_SIZE      0x00100000   // size of cached screen area
+    #endif
+#else                                        // if not using ARM CAPTURE (i.e. using GPU CAPTURE) then enable mode7 options
+#define USE_ALT_M7DEINTERLACE_CODE           // uses re-ordered code for mode7 deinterlace
+#define USE_CACHED_SCREEN                    // caches the upper half of the screen area and uses it for mode7 deinterlace
+#define CACHED_SCREEN_OFFSET    0x00B00000   // offset to cached screen area
+#define CACHED_SCREEN_SIZE      0x00100000   // size of cached screen area
+#endif
+
+#define USE_MULTICORE
+
+#define DONT_USE_MULTICORE_ON_PI2
+
 // Define how the Pi Framebuffer is initialized
 // - if defined, use the property interface (Channel 8)
 // - if not defined, use to the the framebuffer interface (Channel 1)
@@ -15,8 +38,12 @@
 #define HIDE_INTERFACE_SETTING
 
 // Define the legal range of HDMI pixel clocks
-#define MIN_PIXEL_CLOCK      25.0 //  25MHz
+#define MIN_PIXEL_CLOCK      24.5 //  24.5MHz
+#ifdef RPI4
+#define MAX_PIXEL_CLOCK     600.0 // 600MHz
+#else
 #define MAX_PIXEL_CLOCK     340.0 // 340MHz
+#endif
 
 // Enable multiple buffering and vsync based page flipping
 #define MULTI_BUFFER
@@ -29,24 +56,30 @@
 
 // Control bits (maintained in r3)
 
-#define BIT_MODE7                 0x01   // bit  0, indicates mode 7
-#define BITDUP_ENABLE_GREY_DETECT 0x01   // bit  0, enable grey screen detection
-#define BIT_PROBE                 0x02   // bit  1, indicates the mode is being determined
-#define BITDUP_FFOSD_DETECTED     0x02   // bit  1, indicates ffosd detected
-#define BIT_CALIBRATE             0x04   // bit  2, indicates calibration is happening
-#define BIT_OSD                   0x08   // bit  3, indicates the OSD is visible
-#define BIT_MODE_DETECT           0x10   // bit  4, indicates mode changes should be detected
-#define BITDUP_LINE_CONDITION_DETECTED      0x10   // bit  4, indicates grey screen detected
-#define BIT_NO_LINE_DOUBLE 0x20       // bit  5, if set then lines aren't duplicated in capture
-#define BIT_NO_SCANLINES   0x40       // bit  6, indicates scan lines should be made visible
-#define BIT_INTERLACED_VIDEO   0x80   // bit  7, if set then interlaced video detected or teletext enabled
-#define BIT_CLEAR         0x100       // bit  8, indicates the frame buffer should be cleared
-#define BIT_VSYNC         0x200       // bit  9, indicates the red vsync indicator should be displayed
-#define BIT_VSYNC_MARKER  0x400       // bit 10, indicates current line should be replaced by the red vsync indicator
-#define BIT_DEBUG         0x800       // bit 11, indicates the debug grid should be displayed
+//the BITDUP bits reuse some bits in the inner capture loops
+
+#define BIT_ELK                         0x01   // bit  0, indicates we are an Electron
+#define BITDUP_LINE_CONDITION_DETECTED   0x01   // bit  0, indicates grey screen detected
+#define BIT_PROBE                       0x02   // bit  1, indicates the mode is being determined
+#define BITDUP_FFOSD_DETECTED            0x02   // bit  1, indicates ffosd detected
+#define BIT_CALIBRATE                   0x04   // bit  2, indicates calibration is happening
+#define BIT_OSD                         0x08   // bit  3, indicates the OSD is visible
+#define BIT_FIELD_TYPE1_VALID           0x10   // bit  4, indicates FIELD_TYPE1 is valid
+#define BITDUP_ENABLE_GREY_DETECT        0x10   // bit  4, enable grey screen detection
+#define BIT_NO_LINE_DOUBLE              0x20   // bit  5, if set then lines aren't duplicated in capture
+#define BIT_NO_SCANLINES                0x40   // bit  6, indicates scan lines should be made visible
+#define BIT_INTERLACED_VIDEO            0x80   // bit  7, if set then interlaced video detected or teletext enabled
+#define BIT_CLEAR                      0x100   // bit  8, indicates the frame buffer should be cleared
+#define BITDUP_ENABLE_FFOSD             0x100   // bit  8, indicates FFOSD is enabled
+#define BIT_VSYNC                      0x200   // bit  9, indicates the red v sync indicator should be displayed
+#define BIT_VSYNC_MARKER               0x400   // bit 10, indicates current line should be replaced by the red vsync indicator
+#define BIT_DEBUG                      0x800   // bit 11, indicates the debug grid should be displayed
 
 #define OFFSET_LAST_BUFFER 12        // bit 12-13 LAST_BUFFER
 #define MASK_LAST_BUFFER (3 << OFFSET_LAST_BUFFER)
+
+#define BITDUP_RGB_INVERT            0x1000   //bit 12, indicates 9/12 bit RGB should be inverted
+#define BITDUP_Y_INVERT              0x2000   //bit 13, indicates 9/12 bit G should be inverted
 
 #define OFFSET_CURR_BUFFER 14        // bit 14-15 CURR_BUFFER
 #define MASK_CURR_BUFFER (3 << OFFSET_CURR_BUFFER)
@@ -54,8 +87,8 @@
 #define OFFSETDUP_PALETTE_HIGH_NIBBLE 12        // bit 12-15
 #define MASKDUP_PALETTE_HIGH_NIBBLE (15 << OFFSETDUP_PALETTE_HIGH_NIBBLE)
 
-#define BIT_INHIBIT_MODE_DETECT   0x10000       // bit 16 inhibit mode detection if sideways scrolling
-#define BIT_PSYNC_POL  0x20000       // bit 17, indicates psync inversion (NEEDS TO MATCH PSYNC_PIN below)
+#define BIT_INHIBIT_MODE_DETECT      0x10000       // bit 16 inhibit mode detection if sideways scrolling
+#define BIT_PSYNC_POL                0x20000       // bit 17, indicates psync inversion (NEEDS TO MATCH PSYNC_PIN below)
 
 #define OFFSET_NBUFFERS    18        // bit 18-19 NBUFFERS
 #define MASK_NBUFFERS    (3 << OFFSET_NBUFFERS)
@@ -63,37 +96,41 @@
 #define OFFSET_INTERLACE   20        // bit 20-22 INTERLACE
 #define MASK_INTERLACE   (7 << OFFSET_INTERLACE)
 
-#define BIT_FIELD_TYPE1          0x00800000  // bit 23, indicates the field type of the previous field
-#define BIT_FIELD_TYPE1_VALID    0x01000000  // bit 24, indicates FIELD_TYPE1 is valid
+#define BIT_FIELD_TYPE1           0x00800000  // bit 23, indicates the field type of the previous field
+#define BITDUP_IIGS_DETECT        0x00800000  // bit 23, if set then apple IIGS mode detection enabled
 
-#define BITDUP_MODE2_16COLOUR    0x00800000  // bit 23, if set then 16 colour mode 2 is emulated by decoding mode 0
+#define BIT_FIELD_TYPE            0x01000000  // bit 24, indicates the field type (0 = odd, 1 = even) of the last field
+#define BITDUP_MODE2_16COLOUR     0x01000000  // bit 24, if set then 16 colour mode 2 is emulated by decoding mode 0
 
-#define BIT_OLD_FIRMWARE_SUPPORT 0x02000000  // bit 25, indicates old CPLD v1 or v2
+#define BIT_OLD_FIRMWARE_SUPPORT  0x02000000  // bit 25, indicates old CPLD v1 or v2
                                              // then a second time to capture stable data. The v3 CPLD delays PSYNC a
                                              // couple of cycles, so the read that sees the edge will always capture
                                              // stable data. The second read is skipped in this case.
-#define BIT_NO_H_SCROLL          0x04000000  // bit 26, if set then smooth H scrolling disabled
-#define BIT_ELK                  0x08000000  // bit 27, indicates we are an Electron
-#define BIT_NO_AUTOSWITCH        0x10000000  // bit 28, if set then autoselect enabled
-#define BIT_FIELD_TYPE           0x20000000  // bit 29, indicates the field type (0 = odd, 1 = even) of the last field
-#define BIT_NO_SKIP_HSYNC        0x40000000  // bit 30  clear if hsync is ignored (used by cache preload)
-#define BIT_HSYNC_EDGE           0x80000000  // bit 31  clear if trailing edge
+#define BIT_NO_H_SCROLL           0x04000000  // bit 26, if set then smooth H scrolling disabled
+#define BIT_NO_SKIP_HSYNC         0x08000000  // bit 27, clear if hsync is ignored (used by cache preload)
+#define BIT_HSYNC_EDGE            0x10000000  // bit 28, clear if trailing edge
+#define BIT_RPI234                0x20000000  // bit 29, set if Pi 2, 3 or 4 detected
+#define BIT_SKIP_ALT_FRAME        0x40000000  // bit 30, set to skip capture of alternate frames used in 4K@25/30Hz
+//#define BIT_                    0x80000000  // bit 31, may get corrupted - check
 
 // R0 return value bits
-#define RET_SW1                 0x02
-#define RET_SW2                 0x04
-#define RET_SW3                 0x08
-#define RET_EXPIRED             0x10
-#define RET_INTERLACE_CHANGED   0x20
-#define RET_SYNC_TIMING_CHANGED 0x40
-#define RET_VSYNC_POLARITY_CHANGED 0x80
+#define RET_MODESET                0x01
+#define RET_SW1                    0x02
+#define RET_SW2                    0x04
+#define RET_SW3                    0x08
+#define RET_EXPIRED                0x10
+#define RET_INTERLACE_CHANGED      0x20
+#define RET_SYNC_TIMING_CHANGED    0x40
+#define RET_SYNC_POLARITY_CHANGED  0x80
+#define RET_SYNC_STATE_CHANGED    0x100
+
 //paletteFlags
-#define BIT_IN_BAND_ENABLE    0x01  // bit 0, if set in band data detection is enabled
-#define BIT_IN_BAND_DETECTED  0x02  // bit 1, if set if in band data is detected
-#define BIT_MODE2_PALETTE     0x04  // bit 2, if set mode 2 palette is customised
-#define BIT_MODE7_PALETTE     0x08  // bit 3, if set mode 7 palette is customised
-#define BIT_SET_MODE2_16COLOUR   0x10  // bit 4, if set mode 2 16 colour is enabled
-#define BIT_MULTI_PALETTE        0x020   // bit 5  if set then multiple 16 colour palettes
+#define BIT_IN_BAND_ENABLE         0x01  // bit 0, if set in band data detection is enabled
+#define BIT_IN_BAND_DETECTED       0x02  // bit 1, if set if in band data is detected
+#define BIT_MODE2_PALETTE          0x04  // bit 2, if set mode 2 palette is customised
+#define BIT_MODE7_PALETTE          0x08  // bit 3, if set mode 7 palette is customised
+#define BIT_SET_MODE2_16COLOUR     0x10  // bit 4, if set mode 2 16 colour is enabled
+#define BIT_MULTI_PALETTE         0x020   // bit 5  if set then multiple 16 colour palettes
 
 #define VERTICAL_OFFSET         6      // start of actual bbc screen from start of buffer
 
@@ -102,38 +139,49 @@
 
 #define BIT_BOTH_BUFFERS (BIT_DRAW_BUFFER | BIT_DISP_BUFFER)
 
-// Pi 2/3 Multicore options
-#if defined(RPI2) || defined(RPI3) || defined(RPI4)
-// Indicate the platform has multiple cores
-#define HAS_MULTICORE                // puts unused cores to sleep
-#endif
-#if defined(RPI3)
-#define USE_MULTICORE                // makes Advanced Motion deinterlace use 2nd core
-#endif
-#if defined(RPI2) || defined(RPI3)   // Pi4 may not need these
-#define USE_ALT_M7DEINTERLACE_CODE     // uses re-ordered code for bob and simple motion deinterlace
-#define USE_CACHED_COMPARISON_BUFFER // uses cached memory for the comparison buffer with simple & advanced motion deinterlace
-#define INHIBIT_DOUBLE_HEIGHT        // inhibit line doubling as it causes memory stalls with Pi2 & Pi3
-#endif
-
 #ifdef __ASSEMBLER__
+#define GPU_COMMAND_BASE_OFFSET 0x000000a0
 
-#define GPFSEL0 (PERIPHERAL_BASE + 0x200000)  // controls GPIOs 0..9
-#define GPFSEL1 (PERIPHERAL_BASE + 0x200004)  // controls GPIOs 10..19
-#define GPFSEL2 (PERIPHERAL_BASE + 0x200008)  // controls GPIOs 20..29
-#define GPSET0  (PERIPHERAL_BASE + 0x20001C)
-#define GPCLR0  (PERIPHERAL_BASE + 0x200028)
-#define GPLEV0  (PERIPHERAL_BASE + 0x200034)
-#define GPEDS0  (PERIPHERAL_BASE + 0x200040)
-#define GPREN0  (PERIPHERAL_BASE + 0x20004C)
-#define GPFEN0  (PERIPHERAL_BASE + 0x200058)
-#define GPAREN0 (PERIPHERAL_BASE + 0x20007C)
-#define GPAFEN0 (PERIPHERAL_BASE + 0x200088)
+//#define GPU_DATA_0  (PERIPHERAL_BASE + 0x000000a4)
+//#define GPU_DATA_1  (PERIPHERAL_BASE + 0x000000a8)
+//#define GPU_DATA_2  (PERIPHERAL_BASE + 0x000000ac)
+//#define GPU_SYNC    (PERIPHERAL_BASE + 0x000000b0)  //gap in data block to allow fast 3 register read on ARM side
+//#define GPU_DATA_3  (PERIPHERAL_BASE + 0x000000b4)  //using a single ldr and a two register ldmia
+//#define GPU_DATA_4  (PERIPHERAL_BASE + 0x000000b8)  //can't use more than a single unaligned two register ldmia on the peripherals
+//#define GPU_DATA_5  (PERIPHERAL_BASE + 0x000000bc)
 
-#define FIQCTRL (PERIPHERAL_BASE + 0x00B20C)
+#define GPU_COMMAND_offset 0x00
+#define GPU_DATA_0_offset  0x04
+#define GPU_DATA_1_offset  0x08
+#define GPU_DATA_2_offset  0x0c
+#define GPU_SYNC_offset    0x10
+#define GPU_DATA_3_offset  0x14
+#define GPU_DATA_4_offset  0x18
+#define GPU_DATA_5_offset  0x1c
 
-#define INTPEND2 (PERIPHERAL_BASE + 0x00B208)
-#define SMICTRL  (PERIPHERAL_BASE + 0x600000)
+#define GPIO_BASE_OFFSET  0x200000
+#define GPSET0_OFFSET     0x00001C
+#define GPCLR0_OFFSET     0x000028
+#define GPLEV0_OFFSET     0x000034
+
+#if defined(RPI4)
+#define INTPEND2_OFFSET   0x00B204    //SMI interrupt (GPU # 48 used for vsync) is actually in IRQ0_PENDING1 on pi 4 (0xfe00b204)
+#else
+#define INTPEND2_OFFSET   0x00B208
+#endif
+
+#define SMICTRL_OFFSET    0x600000
+
+//#define GPFSEL0 (PERIPHERAL_BASE + 0x200000)  // controls GPIOs 0..9
+//#define GPFSEL1 (PERIPHERAL_BASE + 0x200004)  // controls GPIOs 10..19
+//#define GPFSEL2 (PERIPHERAL_BASE + 0x200008)  // controls GPIOs 20..29
+//#define GPEDS0  (PERIPHERAL_BASE + 0x200040)
+//#define GPREN0  (PERIPHERAL_BASE + 0x20004C)
+//#define GPFEN0  (PERIPHERAL_BASE + 0x200058)
+//#define GPAREN0 (PERIPHERAL_BASE + 0x20007C)
+//#define GPAFEN0 (PERIPHERAL_BASE + 0x200088)
+//#define FIQCTRL (PERIPHERAL_BASE + 0x00B20C)
+
 
 // Offsets into capture_info_t structure below
 #define O_FB_BASE          0
@@ -159,7 +207,11 @@
 #define O_BORDER          80
 #define O_DELAY           84
 #define O_INTENSITY       88
-#define O_CAPTURE_LINE    92
+#define O_AUTOSWITCH      92
+#define O_TIMINGSET       96
+#define O_SYNCEDGE        100
+#define O_MODE7           104
+#define O_CAPTURE_LINE    108
 
 #else
 
@@ -187,14 +239,17 @@ typedef struct {
    int border;         // border logical colour
    int delay;          // delay value from sampling menu & 3
    int intensity;      // scanline intensity
+   int autoswitch;     // autoswitch detect mode
+   int timingset;      // 0 = set1, 1 = set 2
+   int sync_edge;      // sync edge setting
+   int mode7;          // mode7 flag
    int (*capture_line)(); // the capture line function to use
    int px_sampling;    // whether to sample normally, sub-sample or pixel double
-
 } capture_info_t;
 
 typedef struct {
    int clock;                // sample clock frequency (Hz)
-   int line_len;             // length of a line (in sample clocks)
+   double line_len;          // length of a line (in sample clocks)
    int clock_ppm;            // sample clock frequency (Hz)
    int lines_per_frame;
 } clk_info_t;
@@ -235,8 +290,10 @@ typedef struct {
 #define PSYNC_MASK    (1U << PSYNC_PIN)
 #define CSYNC_MASK    (1U << CSYNC_PIN)
 #define LED1_MASK     (1U << LED1_PIN)
+#define MODE7_MASK    (1U << MODE7_PIN)
 #define VERSION_MASK  (1U << VERSION_PIN)
 #define STROBE_MASK   (1U << STROBE_PIN)
+#define SP_CLK_MASK   (1U << SP_CLK_PIN)
 #define SP_DATA_MASK  (1U << SP_DATA_PIN)
 #define MUX_MASK      (1U << MUX_PIN)
 
@@ -249,25 +306,44 @@ typedef struct {
 #define SYNC_BIT_COMPOSITE_SYNC   0x04      // bit  2, indicates composite sync
 #define SYNC_BIT_MIXED_SYNC       0x08      // bit  3, indicates H and V syncs eored in CPLD
 #define SYNC_BIT_INTERLACED       0x10      // bit  4, indicates interlaced sync detected
-#define SYNC_BIT_MASK             0x07      // masks out bit 3
+#define SYNC_BIT_MASK             0x07      // masks out bits 3 + 4
 
 #define VSYNC_RETRY_MAX 10
 
+#define MAX_STRING_SIZE 255
+#define MIN_STRING_SIZE 127
+#define MAX_STRING_LIMIT 253
+#define MIN_STRING_LIMIT 125
+
 #define MAX_CPLD_FILENAMES 24
 #define MAX_FILENAME_WIDTH 40
-#define MAX_PROFILES 64
-#define MAX_SUB_PROFILES 32
-#define MAX_PROFILE_WIDTH 32
-#define MAX_BUFFER_SIZE 1024
+#define MAX_PROFILES 512
+#define MAX_SUB_PROFILES 64
+#define MAX_FAVOURITES 10
+#define MAX_PROFILE_WIDTH 256
+#define MAX_BUFFER_SIZE 2048
 #define MAX_CONFIG_BUFFER_SIZE 8192
 #define DEFAULT_STRING "Default"
 #define ROOT_DEFAULT_STRING "../Default"
 #define DEFAULTTXT_STRING "Default.txt"
+#define FAVOURITES_PATH "/favourites.txt"
+#define FAVOURITES_MENU "Recently used"
+#define FAVOURITES_MENU_CLEAR "Clear recently used"
 #define NOT_FOUND_STRING "Not Found"
 #define NONE_STRING "None"
 #define MAX_NAMES 64
 #define MAX_NAMES_WIDTH 32
 #define MAX_JITTER_LINES 8
+
+#define CUSTOM_PROFILE_FOLDER "_Custom_"
+#define CUSTOM_PROFILE_NAME "Custom_Profile_"
+
+#define CAPTURE_FILE_BASE "capture"
+#define CAPTURE_BASE "/Captures"
+#define PROFILE_BASE "/Profiles"
+#define SAVED_PROFILE_BASE "/Saved_Profiles"
+#define PALETTES_BASE "/Palettes"
+#define PALETTES_TYPE ".bin"
 
 #define ONE_BUTTON_FILE "/Button_Mode.txt"
 #define FORCE_BLANK_FILE "/cpld_firmware/Delete_This_File_To_Erase_CPLD.txt"
@@ -276,31 +352,41 @@ typedef struct {
 #define FORCE_UPDATE_FILE_MESSAGE "Deleting this file will force a CPLD update check on the next reset\r\n"
 #define BLANK_FILE "/cpld_firmware/recovery/blank/BLANK.xsvf"
 
-#define NTSC_SOFT 0x04
-#define NTSC_MEDIUM 0x08
-#define NTSC_ARTIFACT 0x10
-#define NTSC_ARTIFACT_SHIFT 4
-#define NTSC_Y_INVERT 0x20
-#define NTSC_ARTIFACT_REQUIRED 0x40
-#define NTSC_ARTIFACT_REQUIRED_SHIFT 2
-#define NTSC_HDMI_BLANK 0x80        //not actually ntsc but uses a spare bit
+#define PAXHEADER "PaxHeader"
+
+#define NTSC_SOFT               0x04
+#define NTSC_MEDIUM             0x08
+#define NTSC_ARTIFACT           0x10
+#define NTSC_ARTIFACT_SHIFT        4
+#define NTSC_Y_INVERT           0x20
+#define NTSC_LAST_ARTIFACT      0x40
+#define NTSC_LAST_ARTIFACT_SHIFT   6
+#define NTSC_HDMI_BLANK_ENABLE  0x80        //not actually ntsc but uses a spare bit
+#define NTSC_LAST_IIGS         0x100        //not actually ntsc but uses a spare bit
+#define NTSC_LAST_IIGS_SHIFT       8
+#define NTSC_FFOSD_ENABLE      0x200        //not actually ntsc but uses a spare bit
+#define NTSC_DONE_FIRST        0x400
+#define NTSC_RGB_INVERT        0x800
+
 
 #define BBC_VERSION 0x79
-#define RGB_VERSION 0x92
+#define RGB_VERSION 0x94
 #define YUV_VERSION 0x91
 
 //these defines are adjusted for different clock speeds
-#define FIELD_TYPE_THRESHOLD 45000          //  post frame sync times are ~22uS & ~54uS on beeb and ~34uS and ~66uS on Amiga so threshold of 45uS covers both
+#define FIELD_TYPE_THRESHOLD_BBC 39000            //  post frame sync times are ~22uS & ~54uS on beeb and ~34uS and ~66uS on Amiga so threshold of 45uS covers both
+#define FIELD_TYPE_THRESHOLD_AMIGA 45000          //  post frame sync times are ~22uS & ~54uS on beeb and ~34uS and ~66uS on Amiga so threshold of 45uS covers both
 #define ELK_LO_FIELD_SYNC_THRESHOLD 150000  // 150uS
 #define ELK_HI_FIELD_SYNC_THRESHOLD 170000  // 170uS
 #define ODD_THRESHOLD 22500
 #define EVEN_THRESHOLD 54500
 #define BBC_HSYNC_THRESHOLD 6144
-#define OTHER_HSYNC_THRESHOLD 9000
+#define NORMAL_HSYNC_THRESHOLD 9000
+#define BLANKING_HSYNC_THRESHOLD 14000
 #define EQUALISING_THRESHOLD 3400      // equalising pulses are half sync pulse length and must be filtered out
 #define FRAME_MINIMUM 10000000         // 10ms
 #define FRAME_TIMEOUT 30000000         // 30ms which is over a frame / field @ 50Hz (20ms)
-#define LINE_MINIMUM 20000             // 20uS
+#define LINE_MINIMUM 10000             // 10uS
 #define HSYNC_SCROLL_LO (4000 - 224)
 #define HSYNC_SCROLL_HI (4000 + 224)
 
@@ -312,14 +398,15 @@ typedef struct {
 #define AUTO_REFRESH 2
 #define DEFAULT_SCALING 0
 #define DEFAULT_FILTERING 8
-#define DEFAULT_HDMI_MODE 0
+#define DEFAULT_HDMI_AUTO 1
+
+#define DISABLE_PI1_PI2_OVERCLOCK 1
+#define DISABLE_SETTINGS_OVERCLOCK 2
+
+#define POWERUP_MESSAGE_TIME 200
 
 #if defined(RPI4)
-#define LINE_TIMEOUT (100 * 1500/1000 * 1024)
-#elif defined(RPI3)
-#define LINE_TIMEOUT (100 * 1200/1000 * 1024)
-#elif defined(RPI2)
-#define LINE_TIMEOUT (100 * 900/1000 * 1024)
+#define LINE_TIMEOUT (100 * 1000/1000 * 1024)
 #else
 #define LINE_TIMEOUT (100 * 1024)
 #endif
@@ -330,7 +417,7 @@ typedef struct {
 #define CRYSTAL 19.2
 #endif
 
-#define MAX_CPLD_FREQUENCY 193000000
+#define MAX_CPLD_FREQUENCY 196000000
 
 #define GENLOCK_NLINES_THRESHOLD 350
 #define GENLOCK_FORCE 1
@@ -340,6 +427,7 @@ typedef struct {
 #define GENLOCK_THRESHOLDS {0, 5, 10, 16, 25, 35}
 #define GENLOCK_LOCKED_THRESHOLD 2
 #define GENLOCK_FRAME_DELAY 12
+#define GENLOCK_SLEW_RATE_THRESHOLD 10000
 
 #define MEASURE_NLINES 100
 #define PLL_PPM_LO 1
@@ -396,50 +484,62 @@ typedef struct {
 #define XOSC_CTRL (0x1190/4)
 #define XOSC_FREQUENCY 19200000
 
-#define SCALER_BASE  (volatile uint32_t *)(PERIPHERAL_BASE + 0x400000)
-
+#define PI4_HDMI0_PLL (volatile uint32_t *)(_get_peripheral_base() + 0xf00f00)
+#define PI4_HDMI0_DIVIDER   (0x28/4)
+#define PI4_HDMI0_RM_OFFSET (0x98/4)   //actually offset 0x18 from the 0xf00f80 block
 
 #if defined(RPI4)
-#define PIXELVALVE2_HORZA (volatile uint32_t *)(PERIPHERAL_BASE + 0x20a00c)
-#define PIXELVALVE2_HORZB (volatile uint32_t *)(PERIPHERAL_BASE + 0x20a010)
-#define PIXELVALVE2_VERTA (volatile uint32_t *)(PERIPHERAL_BASE + 0x20a014)
-#define PIXELVALVE2_VERTB (volatile uint32_t *)(PERIPHERAL_BASE + 0x20a018)
+#define PIXELVALVE2_HORZA (volatile uint32_t *)(_get_peripheral_base() + 0x20a00c)
+#define PIXELVALVE2_HORZB (volatile uint32_t *)(_get_peripheral_base() + 0x20a010)
+#define PIXELVALVE2_VERTA (volatile uint32_t *)(_get_peripheral_base() + 0x20a014)
+#define PIXELVALVE2_VERTB (volatile uint32_t *)(_get_peripheral_base() + 0x20a018)
+#define EMMC_LEGACY       (volatile uint32_t *)(_get_peripheral_base() + 0x2000d0)
 #else
-#define PIXELVALVE2_HORZA (volatile uint32_t *)(PERIPHERAL_BASE + 0x80700c)
-#define PIXELVALVE2_HORZB (volatile uint32_t *)(PERIPHERAL_BASE + 0x807010)
-#define PIXELVALVE2_VERTA (volatile uint32_t *)(PERIPHERAL_BASE + 0x807014)
-#define PIXELVALVE2_VERTB (volatile uint32_t *)(PERIPHERAL_BASE + 0x807018)
+#define PIXELVALVE2_HORZA (volatile uint32_t *)(_get_peripheral_base() + 0x80700c)
+#define PIXELVALVE2_HORZB (volatile uint32_t *)(_get_peripheral_base() + 0x807010)
+#define PIXELVALVE2_VERTA (volatile uint32_t *)(_get_peripheral_base() + 0x807014)
+#define PIXELVALVE2_VERTB (volatile uint32_t *)(_get_peripheral_base() + 0x807018)
 #endif
 
-#define PM_RSTC  (volatile uint32_t *)(PERIPHERAL_BASE + 0x10001c)
-#define PM_WDOG (volatile uint32_t *)(PERIPHERAL_BASE + 0x100024)
+#define PM_RSTC  (volatile uint32_t *)(_get_peripheral_base() + 0x10001c)
+#define PM_WDOG (volatile uint32_t *)(_get_peripheral_base() + 0x100024)
 #define PM_PASSWORD 0x5a000000
 #define PM_RSTC_WRCFG_FULL_RESET 0x00000020
 
 #define CM_PASSWORD                         0x5a000000
-#define CM_PLLA_LOADCORE                      (1 << 4)
-#define CM_PLLA_HOLDCORE                      (1 << 5)
-#define CM_PLLA_LOADPER                       (1 << 6)
-#define CM_PLLA_HOLDPER                       (1 << 7)
+#define CM_PLL_LOADCORE                       (1 << 4)
+#define CM_PLL_HOLDCORE                       (1 << 5)
+#define CM_PLL_LOADPER                        (1 << 6)
+#define CM_PLL_HOLDPER                        (1 << 7)
 #define A2W_PLL_CHANNEL_DISABLE               (1 << 8)
 #define GZ_CLK_BUSY                           (1 << 7)
 #define GZ_CLK_ENA                            (1 << 4)
-#define GP_CLK1_CTL (volatile uint32_t *)(PERIPHERAL_BASE + 0x101078)
-#define GP_CLK1_DIV (volatile uint32_t *)(PERIPHERAL_BASE + 0x10107C)
-#define CM_PLLA     (volatile uint32_t *)(PERIPHERAL_BASE + 0x101104)
+#define GP_CLK1_CTL (volatile uint32_t *)(_get_peripheral_base() + 0x101078)
+#define GP_CLK1_DIV (volatile uint32_t *)(_get_peripheral_base() + 0x10107C)
+#define CM_PLLA     (volatile uint32_t *)(_get_peripheral_base() + 0x101104)
+#define CM_PLLC     (volatile uint32_t *)(_get_peripheral_base() + 0x101124)
+#define CM_PLLD     (volatile uint32_t *)(_get_peripheral_base() + 0x101144)
+#define CM_BASE     (volatile uint32_t *)(_get_peripheral_base() + 0x101000)
 
-#define CM_BASE     (volatile uint32_t *)(PERIPHERAL_BASE + 0x101000)
-
-#define SCALER_DISPLIST1 (volatile uint32_t *)(PERIPHERAL_BASE + 0x400024)
-#define SCALER_DISPLAY_LIST (volatile uint32_t *)(PERIPHERAL_BASE + 0x402000)
+#define SCALER_DISPLIST1 (volatile uint32_t *)(_get_peripheral_base() + 0x400024)
+#if defined(RPI4)
+#define SCALER_DISPLAY_LIST (volatile uint32_t *)(_get_peripheral_base() + 0x404000)
+#else
+#define SCALER_DISPLAY_LIST (volatile uint32_t *)(_get_peripheral_base() + 0x402000)
+#endif
 
 #define PIXEL_FORMAT 1  // RGBA4444
+#ifdef RPI4
+#define PIXEL_ORDER 2   // ABGR in BCM2711
+#else
 #define PIXEL_ORDER 3   // ABGR
+#endif
 
 #define GREY_PIXELS 0xaaa
 #define GREY_DETECTED_LINE_COUNT 200
 #define ARTIFACT_DETECTED_LINE_COUNT 100
 #define DPMS_FRAME_COUNT 200
+#define IIGS_DETECTED_LINE_COUNT 128
 
 #define  SIZEX2_DOUBLE_HEIGHT    1
 #define  SIZEX2_DOUBLE_WIDTH     2
@@ -451,21 +551,40 @@ typedef struct {
 #define   PALETTECONTROL_NTSCARTIFACT_CGA      2
 #define   PALETTECONTROL_NTSCARTIFACT_BW       3
 #define   PALETTECONTROL_NTSCARTIFACT_BW_AUTO  4
-#define   PALETTECONTROL_PALARTIFACT           5
+#define   PALETTECONTROL_C64_YUV               5
 #define   PALETTECONTROL_ATARI_GTIA            6
-#define   NUM_CONTROLS                         7
+#define   PALETTECONTROL_C64_LUMACODE          7
+#define   PALETTECONTROL_ATARI_LUMACODE        8
+#define   PALETTECONTROL_ATARI2600_LUMACODE    9
+#define   NUM_CONTROLS                         10
+
+#define   INHIBIT_PALETTE_DIMMING_16_BIT 0x80000000
+
+#define   AUTOSWITCH_OFF         0
+#define   AUTOSWITCH_PC          1
+#define   AUTOSWITCH_MODE7       2
+#define   AUTOSWITCH_VSYNC       3
+#define   AUTOSWITCH_IIGS        4
+#define   AUTOSWITCH_IIGS_MANUAL 5
+#define   AUTOSWITCH_MANUAL      6
+
+#define   NUM_AUTOSWITCHES  7
 
 #define  VSYNC_AUTO                    0
 #define  VSYNC_INTERLACED              1
 #define  VSYNC_INTERLACED_160          2
 #define  VSYNC_NONINTERLACED           3
 #define  VSYNC_NONINTERLACED_DEJITTER  4
-#define  NUM_VSYNC                     5
+#define  VSYNC_BLANKING                5
+#define  VSYNC_POLARITY                6
+#define  VSYNC_FORCE_INTERLACE         7
+#define  NUM_VSYNC                     8
 
-#define  VIDEO_PROGRESSIVE 0
-#define  VIDEO_INTERLACED  1
-#define  VIDEO_TELETEXT    2
-#define  NUM_VIDEO         3
+#define  VIDEO_PROGRESSIVE   0
+#define  VIDEO_INTERLACED    1
+#define  VIDEO_TELETEXT      2
+#define  VIDEO_LINE_DOUBLED  3
+#define  NUM_VIDEO           4
 
 #define  SAMPLE_WIDTH_1    0
 #define  SAMPLE_WIDTH_3    1
@@ -474,4 +593,25 @@ typedef struct {
 #define  SAMPLE_WIDTH_9HI  4
 #define  SAMPLE_WIDTH_12   5
 
+#define  MODE_SET1       0
+#define  MODE_SET2       1
+
+#define  SYNC_ABORT_FLAG   0x80000000
+#define  LEADING_SYNC_FLAG 0x00010000
+#define  SIMPLE_SYNC_FLAG  0x00008000
+#define  HIGH_LATENCY_FLAG 0x00004000
+#define  OLD_FIRMWARE_FLAG 0x00002000
+
+#define  CPLD_NORMAL      0
+#define  CPLD_BLANK       1
+#define  CPLD_UNKNOWN     2
+#define  CPLD_WRONG       3
+#define  CPLD_MANUAL      4
+#define  CPLD_UPDATE      5
+#define  CPLD_NOT_FITTED  6
+
 #endif
+
+#define Bit32u uint32_t
+#define Bit8u uint8_t
+#define Bitu uint32_t

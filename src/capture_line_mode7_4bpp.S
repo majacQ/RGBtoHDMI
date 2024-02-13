@@ -29,8 +29,13 @@ capture_line_mode7_4bpp:
         // by Ian Bradbury (IanB on stardot). Many thanks Ian.
         //
         push   {lr}
+
+#if defined(USE_CACHED_SCREEN)
+        add    r0, r0, #CACHED_SCREEN_OFFSET
+#endif
         add    r11, r0, r8          // offset to second buffer used for comparison not for display
         mov    r12, r0              // pointer to the line in the frame buffer
+
         tst    r3, #BIT_CALIBRATE
         bne    process_chars_7_none
         ands   r8, r3, #MASK_INTERLACE
@@ -61,6 +66,7 @@ capture_line_mode7_4bpp:
         // r12 = pixel value from comparison buffer
 
         SKIP_PSYNC
+        mov    r1, r1, lsr #1
         mov    r5, #0
         mov    r6, #0
         mov    r7, #0
@@ -127,12 +133,23 @@ process_chars_loop_7_simple:
         bicne  r9, r6, r8           // extract the OSD bits from old pixel value
         orrne  r9, r9, r10          // merge new pixel data
         strne  r9, [r0, r2]         // save new pixel data in other field
-
+#if defined(USE_CACHED_SCREEN)
+        sub    r0, r0, #CACHED_SCREEN_OFFSET
+        strne  r9, [r0, r2]         // save new pixel data in other field
+        add    r0, r0, #CACHED_SCREEN_OFFSET
+#endif
         bic    r9, r5, r8           // extract the OSD bits from old pixel value
         orr    r10, r10, r9         // OR in OSD bits from old pixel value
         eor    r10, r7              // EOR in the VSync indicator
 
-        str    r10, [r0], #4        // write new pixel value to video buffer
+#if defined(USE_CACHED_SCREEN)
+        str    r10, [r0]
+        sub    r0, r0, #CACHED_SCREEN_OFFSET
+        str    r10, [r0], #4
+        add    r0, r0, #CACHED_SCREEN_OFFSET
+#else
+        str    r10, [r0], #4         // write new pixel value to video buffer
+#endif
         subs   r1, r1, #1
         bne    process_chars_loop_7_simple
         pop     {r0, pc}
@@ -143,6 +160,7 @@ process_chars_7_none:
         // No deinterlace
 
         SKIP_PSYNC
+        mov    r1, r1, lsr #1
         mov    r7, #0
         tst    r3, #BIT_VSYNC_MARKER
         ldrne  r7, =0x11111111       // the VSync indicator
@@ -165,7 +183,15 @@ process_chars_loop_7_none:
         bic    r9, r9, r11
 
         orr    r10, r10, r9
+
+#if defined(USE_CACHED_SCREEN)
+        str    r10, [r0]
+        sub    r0, r0, #CACHED_SCREEN_OFFSET
         str    r10, [r0], #4
+        add    r0, r0, #CACHED_SCREEN_OFFSET
+#else
+        str    r10, [r0], #4
+#endif
         subs   r1, r1, #1
         bne    process_chars_loop_7_none
         pop     {r0, pc}
@@ -175,6 +201,7 @@ process_chars_loop_7_none:
 process_chars_7_bob:
         // Simple bob deinterlace
         SKIP_PSYNC
+        mov    r1, r1, lsr #1
         mov    r5, #0
         mov    r6, #0
         mov    r7, #0
@@ -208,26 +235,22 @@ process_chars_loop_7_bob:
         str    r14, [r0, r2]
 
         orr    r10, r10, r9
+#if defined(USE_CACHED_SCREEN)
+        str    r10, [r0]
+        sub    r0, r0, #CACHED_SCREEN_OFFSET
+        str    r14, [r0, r2]
         str    r10, [r0], #4
+        add    r0, r0, #CACHED_SCREEN_OFFSET
+#else
+        str    r10, [r0], #4
+#endif
         subs   r1, r1, #1
         bne    process_chars_loop_7_bob
         pop     {r0, pc}
 
        .align 6
        .ltorg
-                                // all 6 osd buffers must be sequential
-osdbuffer3:
-        .word 0
-osdbufferA1:
-        .word 0
-osdbufferA2:
-        .word 0
-osdbufferA3:
-        .word 0
-charline:
-        .word 0
-r1save:
-        .word 0
+
 
 process_chars_7_advanced:
         // Advanced deinterlace
@@ -249,32 +272,18 @@ process_chars_7_advanced:
         // r12 = pointer into frame buffer (moves within line)
         // r14 = misc
         str    r6, charline
-#ifdef USE_MULTICORE
-        ldr    r8, =line_buffer
-        ldr    r10, =read_pointer
-        str    r8, [r10], #4
-        str    r8, [r10], #4 //write_pointer
-        str    r3, [r10], #4 //r3copy
-        str    r4, [r10], #4 //r4copy
-        str    r9, [r10], #4 //r9copy
-        str    r1, [r10], #4 //capture_count
-        str    r7, [r10] //skip_count
-        dmb    // wait until memory written
-        sev    // wake up core
-waitforskip:
-        ldr    r7, [r10]
-        cmp    r7, #0
-        bne    waitforskip
-        READ_CYCLE_COUNTER r14
-        push    {r14}
-#else
+        add    r1, r1, #4                  //fix a rounding issue in GPU capture mode
         SKIP_PSYNC
-#endif
+        sub    r1, r1, #4
+        mov    r1, r1, lsr #1
 
 process_chars_loop_7_advanced:
-#ifdef USE_MULTICORE
+#ifdef USE_ALT_M7DEINTERLACE_CODE
         str    r1, r1save
-        CAPTURE_FROM_CORE1
+        WAIT_FOR_PSYNC_EDGE
+        CAPTURE_LOW_BITS
+        WAIT_FOR_PSYNC_EDGE
+        CAPTURE_HIGH_BITS
         tst    r3, #BIT_OSD
         ldmneia r12, {r5, r6, r7}           // preload current field old screen values (three words) if OSD on
         moveq  r5,#0
@@ -321,13 +330,16 @@ process_chars_loop_7_advanced:
         moveq  r5,#0
         moveq  r7,#0
 
-#ifdef USE_MULTICORE
+#ifdef USE_ALT_M7DEINTERLACE_CODE
         adr    r14, osdbufferA1
         bic    r5, r5, r1                   // extract OSD bits
         bic    r7, r7, r1                   // extract OSD bits
         stmia  r14, {r5, r6, r7}            // save for later in osdbufferA1 but don't extract OSD bits on r6 as might need half old pixel data
         mov    r1, r10
-        CAPTURE_FROM_CORE1
+        WAIT_FOR_PSYNC_EDGE
+        CAPTURE_LOW_BITS
+        WAIT_FOR_PSYNC_EDGE
+        CAPTURE_HIGH_BITS
         add    r14, r11, r2                 // r14 points to other field
         ldmia  r14, {r5, r6, r7}            // preload other field old values from comparison buffer (3 words)
 #else
@@ -448,6 +460,22 @@ process_chars_loop_7_advanced:
         beq    deinterlace1
         cmp    r9, r14
         beq    nodeinterlace1      // if rounding pair then don't deinterlace
+        b      deinterlace1
+                                 // all 6 osd buffers must be sequential
+       .align 6
+osdbuffer3:
+        .word 0
+osdbufferA1:
+        .word 0
+osdbufferA2:
+        .word 0
+osdbufferA3:
+        .word 0
+charline:
+        .word 0
+r1save:
+        .word 0
+
 
 deinterlace1:
         ldr    r14, osdbufferA1       // get OSD bits
@@ -467,14 +495,10 @@ deinterlace1:
 
 nodeinterlace1:
         mov    r0, r10                // save middle word in r0
-#ifdef USE_MULTICORE
-        CAPTURE_FROM_CORE1
-#else
         WAIT_FOR_PSYNC_EDGE
         CAPTURE_LOW_BITS
         WAIT_FOR_PSYNC_EDGE
         CAPTURE_HIGH_BITS
-#endif
         // deinterlace 2nd char here
 
         //  all the above code is repeated for the 2nd character but is slightly different
@@ -605,6 +629,19 @@ deinterlace2:
 nodeinterlace2:
 
         ldr    r1, r1save
+
+#if defined(USE_CACHED_SCREEN)
+        ldmia  r12, {r5 - r7}
+        sub    r12, r12, #CACHED_SCREEN_OFFSET
+        stmia  r12, {r5 - r7}
+        add    r12, r12, #CACHED_SCREEN_OFFSET
+        add    r12, r12, r2
+        ldmia  r12, {r5 - r7}
+        sub    r12, r12, #CACHED_SCREEN_OFFSET
+        stmia  r12, {r5 - r7}
+        add    r12, r12, #CACHED_SCREEN_OFFSET
+        sub    r12, r12, r2
+#endif
 
         add    r11, r11, #12
         add    r12, r12, #12

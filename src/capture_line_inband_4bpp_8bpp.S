@@ -26,13 +26,13 @@
 //
 // All registers are available as scratch registers (i.e. nothing needs to be preserved)
 
-
 inBandData:
         .space 32768, 0
 
 paletteHighNibble:
         .space 4096, 0
         .align 6
+
         b       preload_capture_line_inband_4bpp
 capture_line_inband_4bpp:
         push    {lr}
@@ -44,6 +44,7 @@ capture_line_inband_4bpp:
         biceq   r3, r3, #BITDUP_MODE2_16COLOUR
         ldr     r12, sentinel            // 32 bit sentinel
         SKIP_PSYNC
+        mov     r1, r1, lsr #1
         mov     r7, #0
 loop:
         WAIT_FOR_PSYNC_EDGE              // expects GPLEV0 in r4, result in r8
@@ -165,6 +166,7 @@ preload_capture_line_inband_4bpp:
         bl      preload_foundmode0inband
         mov     r1, #6
         bl      preload_foundmode0to6inband
+exitpreload:
         pop     {r0, r1}
         str     r0, paletteFlags
         str     r1, inBandPointer
@@ -207,6 +209,7 @@ capture_line_inband_8bpp:
         ldr     r11, inBandPointer
         ldr     r12, sentinel            // 32 bit sentinel
         SKIP_PSYNC
+        mov     r1, r1, lsr #1
         mov     r7, #0
 loop_8bpp:
         WAIT_FOR_PSYNC_EDGE              // expects GPLEV0 in r4, result in r8
@@ -322,8 +325,8 @@ blank0to6loop_8bpp:
         str     r8, paletteFlags
         pop    {r0, pc}
 
-
 preload_capture_line_inband_8bpp:
+
         push    {lr}
         ldr     r0, paletteFlags
         ldr     r1, inBandPointer
@@ -336,7 +339,5 @@ preload_capture_line_inband_8bpp:
         bl      preload_foundmode0inband_8bpp
         mov     r1, #6
         bl      preload_foundmode0to6inband_8bpp
-        pop     {r0, r1}
-        str     r0, paletteFlags
-        str     r1, inBandPointer
-        pop     {pc}
+        b       exitpreload
+

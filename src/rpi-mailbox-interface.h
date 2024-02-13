@@ -56,6 +56,7 @@ typedef enum {
    TAG_UNLOCK_MEMORY = 0x3000E,
    TAG_RELEASE_MEMORY = 0x3000F,
    TAG_EXECUTE_CODE = 0x30010,
+   TAG_LAUNCH_VPU1 = 0x30013,
    TAG_GET_DISPMANX_MEM_HANDLE = 0x30014,
    TAG_GET_EDID_BLOCK = 0x30020,
 
@@ -135,9 +136,13 @@ typedef struct {
 #define SDRAM_CLK_ID 0x000000008
 #define PIXEL_CLK_ID 0x000000009
 #define   PWM_CLK_ID 0x00000000a
+#define   HEVC_CLK_ID 0x00000000b
+#define  EMMC2_CLK_ID 0x00000000c
+#define   M2MC_CLK_ID 0x00000000d
+#define PIXEL_BVB_CLK_ID 0x00000000e
 
 #define MIN_CLK_ID  0x000000001
-#define MAX_CLK_ID  0x00000000a
+#define MAX_CLK_ID  0x00000000e
 
 extern void RPI_PropertyInit( void );
 extern void RPI_PropertyAddTag( rpi_mailbox_tag_t tag, ... );

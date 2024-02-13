@@ -44,7 +44,7 @@ int get_revision() {
    }
 }
 
-int get_clock_rate(int clk_id) {
+unsigned int get_clock_rate(int clk_id) {
    rpi_mailbox_property_t *buf;
    RPI_PropertyInit();
    RPI_PropertyAddTag(TAG_GET_CLOCK_RATE, clk_id);
@@ -57,25 +57,48 @@ int get_clock_rate(int clk_id) {
    }
 }
 
-void set_clock_rates(unsigned int cpu, unsigned int core, unsigned int sdram) {
-static unsigned int old_core = -1;
-static unsigned int old_cpu = -1;  
-   if (core != old_core) {
-       delay_in_arm_cycles_cpu_adjust(50000000);
-   }
+void set_clock_rate(int clk_id, unsigned int value) {
    RPI_PropertyInit();
-   RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, ARM_CLK_ID, cpu, 1);
-   RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, CORE_CLK_ID, core, 0);
-   RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, SDRAM_CLK_ID, sdram, 0);
+   RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, clk_id, value, 0);
    RPI_PropertyProcess();
-   if (core != old_core) {
+}
+
+void set_clock_rate_cpu(unsigned int cpu) {
+static unsigned int old_cpu = -1;
+   while (cpu != old_cpu) {
+       RPI_PropertyInit();
+       RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, ARM_CLK_ID, cpu, 1);
+       RPI_PropertyProcess();
+       calculate_cpu_timings();
+       delay_in_arm_cycles_cpu_adjust(5000000);
+       old_cpu = get_clock_rate(ARM_CLK_ID);
+   }
+}
+
+void set_clock_rate_core(unsigned int core) {
+static unsigned int old_core = -1;
+   delay_in_arm_cycles_cpu_adjust(50000000);
+   while (core != old_core) {
+       RPI_PropertyInit();
+       RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, CORE_CLK_ID, core, 0);
+       RPI_PropertyProcess();
+#ifndef RPI4
        RPI_AuxMiniUartFlush();
        RPI_AuxMiniUartInit(115200, 8);
-       old_core = core;
+#endif
+       delay_in_arm_cycles_cpu_adjust(5000000);
+       old_core = get_clock_rate(CORE_CLK_ID);
    }
-   if (cpu != old_cpu) {
-       calculate_cpu_timings();
-       old_cpu = cpu;
+}
+
+void set_clock_rate_sdram(unsigned int sdram) {
+static unsigned int old_sdram = -1;
+   while (sdram != old_sdram) {
+       RPI_PropertyInit();
+       RPI_PropertyAddTag(TAG_SET_CLOCK_RATE, SDRAM_CLK_ID, sdram, 0);
+       RPI_PropertyProcess();
+       delay_in_arm_cycles_cpu_adjust(5000000);
+       old_sdram = get_clock_rate(SDRAM_CLK_ID);
    }
 }
 
@@ -284,7 +307,11 @@ void dump_useful_info() {
       "ISP",
       "SDRAM",
       "PIXEL",
-      "PWM"
+      "PWM",
+      "HEVC",
+      "EMMC2",
+      "M2MC",
+      "PIXEL_BVB"
    };
 
    int n = sizeof(tags) / sizeof(rpi_mailbox_tag_t);

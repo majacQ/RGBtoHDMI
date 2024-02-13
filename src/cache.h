@@ -22,7 +22,9 @@
 
 void map_4k_page(int logical, int physical);
 
-void enable_MMU_and_IDCaches(void);
+void enable_MMU_and_IDCaches(int cached_screen_area, int cached_screen_size);
+
+void CleanDataCache (void);
 
 #endif
 

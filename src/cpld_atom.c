@@ -141,7 +141,7 @@ static void cpld_calibrate(capture_info_t *capinfo, int elk) {
    for (int value = 0; value < range; value++) {
       config->sp_offset = value;
       write_config(config);
-      metric = diff_N_frames(capinfo, NUM_CAL_FRAMES, 0, elk);
+      metric = diff_N_frames(capinfo, NUM_CAL_FRAMES, elk);
       log_info("INFO: value = %d: metric = ", metric);
       sum_metrics[value] = metric;
       osd_sp(config, 2, metric);
@@ -171,7 +171,7 @@ static void cpld_calibrate(capture_info_t *capinfo, int elk) {
 
    // Perform a final test of errors
    log_info("Performing final test");
-   errors = diff_N_frames(capinfo, NUM_CAL_FRAMES, 0, elk);
+   errors = diff_N_frames(capinfo, NUM_CAL_FRAMES, elk);
    osd_sp(config, 1, errors);
    log_sp(config);
    log_info("Calibration complete, errors = %d", errors);
@@ -279,7 +279,14 @@ static void cpld_set_frontend(int value) {
 
 cpld_t cpld_atom = {
    .name = "Atom",
-   .default_profile = "Acorn_Atom",
+   .nameBBC = "Atom",
+   .nameRGB = "Atom",
+   .nameYUV = "Atom",
+   .nameprefix = "Atom",
+   .nameBBCprefix = "Atom",
+   .nameRGBprefix = "Atom",
+   .nameYUVprefix = "Atom",
+   .default_profile = "Acorn/Acorn_Atom",
    .init = cpld_init,
    .get_version = cpld_get_version,
    .calibrate = cpld_calibrate,

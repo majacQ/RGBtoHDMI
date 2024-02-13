@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "logging.h"
 #include "fatfs/ff.h"
 #include "filesystem.h"
@@ -8,6 +9,8 @@
 #include "rgb_to_fb.h"
 #include "geometry.h"
 #include "rgb_to_hdmi.h"
+#include "startup.h"
+#include "defs.h"
 
 #define USE_LODEPNG
 
@@ -16,13 +19,6 @@
 #else
 #include "tiny_png_out.h"
 #endif
-
-#define CAPTURE_FILE_BASE "capture"
-#define CAPTURE_BASE "/Captures"
-#define PROFILE_BASE "/Profiles"
-#define SAVED_PROFILE_BASE "/Saved_Profiles"
-#define PALETTES_BASE "/Palettes"
-#define PALETTES_TYPE ".bin"
 
 static FATFS fsObject;
 static int capture_id = -1;
@@ -55,7 +51,7 @@ static int generate_png(capture_info_t *capinfo, uint8_t **png, unsigned int *pn
    int width = capinfo->width;
    int width43 = width;
    int height = capinfo->height;
-   int capscale = get_capscale();
+   int capscale = get_parameter(F_SCREENCAP_SIZE);
 
    int hscale = get_hscale();
    int vscale = get_vscale();
@@ -69,7 +65,7 @@ static int generate_png(capture_info_t *capinfo, uint8_t **png, unsigned int *pn
    int png_width = (width >> hdouble) * hscale;
    int png_height = (height >> vdouble) * vscale;
 
-   if (geometry_get_mode()) {
+   if (capinfo->mode7) {
        double ratio = (double) (png_width * 16 / 12) / png_height;
        if (ratio > 1.34 && (capscale == SCREENCAP_HALF43 || capscale == SCREENCAP_FULL43)) {
            width43 = (((int)(((double) width * 4 / 3) / ratio) * 12 / 16) >> 2) << 2;
@@ -99,22 +95,34 @@ static int generate_png(capture_info_t *capinfo, uint8_t **png, unsigned int *pn
        int bottom;
        int png_left = 0;
        int png_right = 0;
+       int png_top = 0;
+       int png_bottom = 0;
 
        get_config_overscan(&left, &right, &top, &bottom);
        if (get_startup_overscan() != 0 && (left != 0 || right != 0) && (capscale == SCREENCAP_HALF || capscale == SCREENCAP_FULL)) {
-           png_left = left * png_width / get_hdisplay();
-           png_right = right * png_width / get_hdisplay();
+           png_left = left * png_width / (get_hdisplay() - left - right);
+           png_right = right * png_width / (get_hdisplay() - left - right);
+           png_top = top * png_height / (get_vdisplay() - top - bottom);
+           png_bottom = bottom * png_height / (get_vdisplay() - top - bottom);
        }
-       log_info("png is %d - %d, %d - %d", left, right, png_left, png_right);
 
-       uint8_t png_buffer[(png_width + png_left + png_right) *3 * png_height];
+       uint8_t png_buffer[(png_width + png_left + png_right) *3 * (png_height + png_top + png_bottom)]  __attribute__((aligned(32)));
        uint8_t *pp = png_buffer;
+
+           if (png_top != 0) {
+               for (int i = 0; i < (png_top * (png_left + png_width + png_right)); i++) {
+                    *pp++ = 0;
+                    *pp++ = 0;
+                    *pp++ = 0;
+               }
+           }
+
 
            for (int y = 0; y < height; y += (vdouble + 1)) {
                 for (int sy = 0; sy < vscale; sy++) {
                     uint8_t *fp = capinfo->fb + capinfo->pitch * y;
                     if (png_left != 0) {
-                        for (int x = 0; x < png_left; x += (hdouble + 1)) {
+                        for (int x = 0; x < png_left; x++) {
                             *pp++ = 0;
                             *pp++ = 0;
                             *pp++ = 0;
@@ -146,7 +154,7 @@ static int generate_png(capture_info_t *capinfo, uint8_t **png, unsigned int *pn
                         }
                     }
                     if (png_right != 0) {
-                        for (int x = 0; x < png_right; x += (hdouble + 1)) {
+                        for (int x = 0; x < png_right; x++) {
                             *pp++ = 0;
                             *pp++ = 0;
                             *pp++ = 0;
@@ -155,14 +163,22 @@ static int generate_png(capture_info_t *capinfo, uint8_t **png, unsigned int *pn
 
                 }
            }
-       unsigned int result = lodepng_encode(png, png_len, png_buffer, (png_width + png_left + png_right), png_height, &state);
+           if (png_bottom != 0) {
+               for (int i = 0; i < (png_bottom * (png_left + png_width + png_right)); i++) {
+                   *pp++ = 0;
+                   *pp++ = 0;
+                   *pp++ = 0;
+               }
+           }
+       //log_info("Encoding png %08X, %08X", png, png_buffer);
+       unsigned int result = lodepng_encode(png, png_len, png_buffer, (png_width + png_left + png_right), png_height + png_top + png_bottom, &state);
        if (result) {
           log_warn("lodepng_encode32 failed (result = %d)", result);
           return 1;
        }
        return 0;
    } else {
-   uint8_t png_buffer[png_width * png_height];
+   uint8_t png_buffer[png_width * png_height]  __attribute__((aligned(32)));
    uint8_t *pp = png_buffer;
        if (capinfo->bpp == 8) {
            for (int y = 0; y < height; y += (vdouble + 1)) {
@@ -212,6 +228,7 @@ static int generate_png(capture_info_t *capinfo, uint8_t **png, unsigned int *pn
                 }
            }
        }
+       //log_info("Encoding png %08X, %08X", png, png_buffer);
        unsigned int result = lodepng_encode(png, png_len, png_buffer, png_width, png_height, &state);
        if (result) {
           log_warn("lodepng_encode32 failed (result = %d)", result);
@@ -232,7 +249,7 @@ static void free_png(uint8_t *png) {
 #else
 
 // TODO: Fix hard-coded max H resolution of 4096
-static uint8_t pixels[3 * 4096];
+static uint8_t pixels[3 * 4096]  __attribute__((aligned(32)));
 
 static uint8_t png_buffer[8 * 1024 * 1024] __attribute__((aligned(0x4000)));
 
@@ -368,8 +385,8 @@ void close_filesystem() {
 
 void capture_screenshot(capture_info_t *capinfo, char *profile) {
    FRESULT result;
-   char path[256];
-   char filepath[256];
+   char path[200];
+   char filepath[MAX_STRING_SIZE];
    FIL file;
    uint8_t *png;
    unsigned int png_len;
@@ -378,13 +395,20 @@ void capture_screenshot(capture_info_t *capinfo, char *profile) {
 
    result = f_mkdir(CAPTURE_BASE);
    if (result != FR_OK && result != FR_EXIST) {
-       log_warn("Failed to create dir %s (result = %d)",CAPTURE_BASE, result);
+       log_warn("Failed to create dir1 %s (result = %d)",CAPTURE_BASE, result);
    }
 
-   sprintf(path, "%s/%s", CAPTURE_BASE, profile);
+   char *position = strchr(profile, '/');
+   if (position) {
+       strcpy(filepath, position + 1);
+   } else {
+       strcpy(filepath, profile);
+   }
+
+   sprintf(path, "%s/%s", CAPTURE_BASE, filepath);
    result = f_mkdir(path);
    if (result != FR_OK && result != FR_EXIST) {
-           log_warn("Failed to create dir %s (result = %d)", path, result);
+           log_warn("Failed to create dir2 %s (result = %d)", path, result);
    }
 
    initialize_capture_id(path);
@@ -405,10 +429,11 @@ void capture_screenshot(capture_info_t *capinfo, char *profile) {
       log_warn("generate_png failed, not writing data");
 
    } else {
-      clear_menu_bits();
       osd_clear();
-      osd_set(0, ATTR_DOUBLE_SIZE, "Screen Capture");
-      osd_set(2, 0, filepath);
+      clear_menu_bits();
+      osd_set_noupdate(0, ATTR_DOUBLE_SIZE, "Screen Capture");
+      osd_set_clear(2, 0, filepath);
+
       log_info("Screen capture PNG length = %d, writing data...", png_len);
 
       UINT num_written = 0;
@@ -433,23 +458,20 @@ void capture_screenshot(capture_info_t *capinfo, char *profile) {
 
 }
 
-unsigned int file_read_profile(char *profile_name, int saved_config_number, char *sub_profile_name, int updatecmd, char *command_string, unsigned int buffer_size) {
+void write_profile_choice(char *profile_name, int saved_config_number, char *cpld_name) {
    FRESULT result;
-   char path[256];
-   char cmdline[100];
    FIL file;
-   unsigned int bytes_read = 0;
    unsigned int num_written = 0;
+   char path[MAX_STRING_SIZE];
+   char cmdline[MAX_STRING_SIZE];
    init_filesystem();
-
-   if (updatecmd) {
-   char name[100];
-   sprintf(name, "/profile_%s.txt", cpld->name);
-   result = f_open(&file, name, FA_WRITE | FA_CREATE_ALWAYS);
+   sprintf(path, "/profile_%s.txt", cpld_name);
+   log_info("Writing: %s", path);
+   result = f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS);
        if (result != FR_OK) {
           log_warn("Failed to open %s (result = %d)", path, result);
           close_filesystem();
-          return 0;
+          return;
        } else {
 
           sprintf(cmdline, "profile=%s\r\n", profile_name);
@@ -461,21 +483,34 @@ unsigned int file_read_profile(char *profile_name, int saved_config_number, char
           if (result != FR_OK) {
                 log_warn("Failed to write %s (result = %d)", path, result);
                 close_filesystem();
-                return 0;
+                return;
              } else if (num_written != cmdlength) {
                 log_warn("%s is incomplete (%d < %d bytes)", path, num_written, cmdlength);
                 close_filesystem();
-                return 0;
+                return;
              }
 
           result = f_close(&file);
           if (result != FR_OK) {
              log_warn("Failed to close %s (result = %d)", path, result);
              close_filesystem();
-             return 0;
+             return;
           }
        }
+       close_filesystem();
    }
+
+unsigned int file_read_profile(char *profile_name, int saved_config_number, char *sub_profile_name, int updatecmd, char *command_string, unsigned int buffer_size) {
+   FRESULT result;
+   char path[MAX_STRING_SIZE];
+   FIL file;
+   unsigned int bytes_read = 0;
+   command_string[bytes_read] = 0;
+   if (updatecmd) {
+       write_profile_choice(profile_name, saved_config_number, (char*)cpld->name);
+   }
+
+   init_filesystem();
 
    if (saved_config_number == 0) {
        if (sub_profile_name != NULL) {
@@ -560,6 +595,7 @@ void scan_cpld_filenames(char cpld_filenames[MAX_CPLD_FILENAMES][MAX_FILENAME_WI
                 if (strcmp(filetype, ".xsvf") == 0) {
                    strncpy(cpld_filenames[*count], fno.fname, MAX_FILENAME_WIDTH);
                    cpld_filenames[*count][strlen(fno.fname) - 5] = 0;
+                   log_info("Found CPLD: %s", cpld_filenames[*count]);
                    (*count)++;
                 }
              }
@@ -571,37 +607,81 @@ void scan_cpld_filenames(char cpld_filenames[MAX_CPLD_FILENAMES][MAX_FILENAME_WI
     close_filesystem();
 }
 
-
-void scan_profiles(char profile_names[MAX_PROFILES][MAX_PROFILE_WIDTH], int has_sub_profiles[MAX_PROFILES], char *path, size_t *count) {
+void scan_profiles(char *prefix, char manufacturer_names[MAX_PROFILES][MAX_PROFILE_WIDTH], char profile_names[MAX_PROFILES][MAX_PROFILE_WIDTH], int has_sub_profiles[MAX_PROFILES], char *path, size_t *mcount, size_t *count) {
+    int initial_count = *count;
     FRESULT res;
     DIR dir;
     FIL file;
-    char fpath[256];
+    char fpath[MAX_STRING_SIZE];
     static FILINFO fno;
     init_filesystem();
+    log_info("Reading path: %s", path);
     res = f_opendir(&dir, path);
     if (res == FR_OK) {
         for (;;) {
             res = f_readdir(&dir, &fno);
-            if (res != FR_OK || fno.fname[0] == 0 || *count == MAX_PROFILES) break;
-            if (fno.fattrib & AM_DIR) {
-                    strncpy(profile_names[*count], fno.fname, MAX_PROFILE_WIDTH);
-                    (*count)++;
-            } else {
-                if (fno.fname[0] != '.' && strlen(fno.fname) > 4 && strcmp(fno.fname, DEFAULTTXT_STRING) != 0) {
-                    char* filetype = fno.fname + strlen(fno.fname)-4;
-                    if (strcmp(filetype, ".txt") == 0) {
-                        strncpy(profile_names[*count], fno.fname, MAX_PROFILE_WIDTH);
-                        profile_names[*count][strlen(fno.fname) - 4] = 0;
-                        (*count)++;
+            if (res != FR_OK || fno.fname[0] == 0 || *mcount == MAX_PROFILES) break;
+            if (fno.fattrib & AM_DIR && strcmp(fno.fname, PAXHEADER) != 0) {
+                fno.fname[MAX_PROFILE_WIDTH - 1] = 0;
+                if (mono_board_detected() == 0 || (mono_board_detected() == 1 && fno.fname[strlen(fno.fname) - 1] == '_')) {
+                    int duplicate = 0;
+                    if (*mcount != 0) {
+                        for (int k = 0; k < *mcount; k++) {
+                            if (strcmp(fno.fname, manufacturer_names[k]) == 0) {
+                                duplicate = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (duplicate == 0) {
+                        strcpy(manufacturer_names[*mcount], fno.fname);
+                        (*mcount)++;
+                    } else {
                     }
                 }
             }
         }
         f_closedir(&dir);
-        qsort(profile_names, *count, sizeof *profile_names, string_compare);
-        for (int i = 0; i < (*count); i++) {
-            sprintf(fpath, "%s/%s.txt", path, profile_names[i]);
+        qsort(manufacturer_names, *mcount, sizeof *manufacturer_names, string_compare);
+        for (int i = 0; i < *mcount; i++) {
+            sprintf(fpath, "%s/%s", path, manufacturer_names[i]);
+            log_info("Scanning folder: %s", fpath);
+            res = f_opendir(&dir, fpath);
+            //log_info("result %X", res);
+            if (res == FR_OK) {
+                for (;;) {
+                    res = f_readdir(&dir, &fno);
+                    if (res != FR_OK || fno.fname[0] == 0 || *count == MAX_PROFILES) break;
+                    if (fno.fattrib & AM_DIR && strcmp(fno.fname, PAXHEADER) != 0) {
+                        fno.fname[MAX_PROFILE_WIDTH - 1] = 0;
+                        if (mono_board_detected() == 0 || (mono_board_detected() == 1 && fno.fname[strlen(fno.fname) - 1] == '_')) {
+                            sprintf(profile_names[*count], "%s%s/%s", prefix, manufacturer_names[i], fno.fname);
+                            log_info("Found profile: %s",  profile_names[*count]);
+                            (*count)++;
+                        }
+                    } else {
+                        if (fno.fname[0] != '.' && strlen(fno.fname) > 4 && strcmp(fno.fname, DEFAULTTXT_STRING) != 0) {
+                            char* filetype = fno.fname + strlen(fno.fname)-4;
+                            if (strcmp(filetype, ".txt") == 0) {
+                                fno.fname[MAX_PROFILE_WIDTH - 1] = 0;
+                                fno.fname[strlen(fno.fname) - 4] = 0;
+                                if (mono_board_detected() == 0 || (mono_board_detected() == 1 && fno.fname[strlen(fno.fname) - 1] == '_')) {
+                                    sprintf(profile_names[*count], "%s%s/%s", prefix, manufacturer_names[i], fno.fname);
+                                    log_info("Found profile: %s",  profile_names[*count]);
+                                    (*count)++;
+                                }
+                            }
+                        }
+                    }
+                }
+                f_closedir(&dir);
+            }
+        }
+        if (*count > initial_count) {
+            qsort(profile_names[initial_count], (*count) - initial_count, sizeof *profile_names, string_compare);
+        }
+        for (int i = initial_count; i < (*count); i++) {
+            sprintf(fpath, "%s/%s.txt", path, profile_names[i] + strlen(prefix));
             res = f_open(&file, fpath, FA_READ);
             if (res == FR_OK) {
                 f_close(&file);
@@ -613,6 +693,7 @@ void scan_profiles(char profile_names[MAX_PROFILES][MAX_PROFILE_WIDTH], int has_
     }
     close_filesystem();
 }
+
 
 void scan_sub_profiles(char sub_profile_names[MAX_SUB_PROFILES][MAX_PROFILE_WIDTH], char *sub_path, size_t *count) {
     FRESULT res;
@@ -632,7 +713,8 @@ void scan_sub_profiles(char sub_profile_names[MAX_SUB_PROFILES][MAX_PROFILE_WIDT
                 if (fno.fname[0] != '.' && strlen(fno.fname) > 4 && strcmp(fno.fname, DEFAULTTXT_STRING) != 0) {
                     char* filetype = fno.fname + strlen(fno.fname)-4;
                     if (strcmp(filetype, ".txt") == 0) {
-                        strncpy(sub_profile_names[*count], fno.fname, MAX_PROFILE_WIDTH);
+                        fno.fname[MAX_PROFILE_WIDTH - 1] = 0;
+                        strcpy(sub_profile_names[*count], fno.fname);
                         sub_profile_names[*count][strlen(fno.fname) - 4] = 0;
                         (*count)++;
                     }
@@ -645,7 +727,7 @@ void scan_sub_profiles(char sub_profile_names[MAX_SUB_PROFILES][MAX_PROFILE_WIDT
     close_filesystem();
 }
 
-void scan_rnames(char names[MAX_NAMES][MAX_NAMES_WIDTH], char *path, char *type, size_t *count) {
+void scan_rnames(char names[MAX_NAMES][MAX_NAMES_WIDTH], char *path, char *type, int truncate, size_t *count) {
     FRESULT res;
     DIR dir;
     static FILINFO fno;
@@ -660,16 +742,18 @@ void scan_rnames(char names[MAX_NAMES][MAX_NAMES_WIDTH], char *path, char *type,
                     char* filetype = fno.fname + strlen(fno.fname) - 4;
                     if (strcmp(filetype, type) == 0) {
                         strncpy(names[*count], fno.fname, MAX_NAMES_WIDTH);
-                        //mask out bit so numbers starting >5 sort before other numbers so 640, 720 & 800 appear before 1024 1280 etc
-                        if (names[*count][0] > '5' && names[*count][0] <= '9') {
-                            names[*count][0] &= 0xef;
-                        }
-                        names[(*count)++][strlen(fno.fname) - 9] = 0;
+                        names[(*count)++][strlen(fno.fname) - truncate] = 0;
                     }
                 }
             }
         }
         f_closedir(&dir);
+        //mask out bit so numbers starting >5 sort before other numbers so 640, 720 & 800 appear before 1024 1280 etc
+        for (int i = 0; i < *count; i++) {
+            if (names[i][0] > '5' && names[i][0] <= '9') {
+                names[i][0] &= 0xef;
+            }
+        }
         qsort(names, *count, sizeof *names, string_compare);
         //restore masked bit
         for (int i = 0; i < *count; i++) {
@@ -745,13 +829,74 @@ int file_load(char *path, char *buffer, unsigned int buffer_size) {
     return result;
 }
 
+int file_save_custom_profile(char *name, char *buffer, unsigned int buffer_size) {
+   FRESULT result;
+   FIL file;
+   unsigned int num_written = 0;
+   char path[MAX_STRING_SIZE];
+   char temp_buffer[MAX_BUFFER_SIZE];
+   int status = 0;
+   init_filesystem();
+
+   result = f_mkdir(PROFILE_BASE);
+   if (result != FR_OK && result != FR_EXIST) {
+       log_warn("Failed to create dir %s (result = %d)",SAVED_PROFILE_BASE, result);
+   }
+   sprintf(path, "%s/%s", PROFILE_BASE, cpld->name);
+
+   result = f_mkdir(path);
+   if (result != FR_OK && result != FR_EXIST) {
+       log_warn("Failed to create dir1 %s (result = %d)",path, result);
+   }
+
+   strcpy(temp_buffer, name);
+   char *index = strchr(temp_buffer, '/');
+   if (index) {
+      *index = 0;
+   }
+   sprintf(path, "%s/%s/%s", PROFILE_BASE, cpld->name, temp_buffer);
+   result = f_mkdir(path);
+   if (result != FR_OK && result != FR_EXIST) {
+       log_warn("Failed to create dir2 %s (result = %d)",path, result);
+   }
+
+   sprintf(path, "%s/%s/%s.txt", PROFILE_BASE, cpld->name, name);
+
+   log_info("Saving custom file %s", path);
+
+   result = f_open(&file, path, FA_WRITE | FA_CREATE_ALWAYS);
+   if (result != FR_OK) {
+      log_warn("Failed to open %s (result = %d)", path, result);
+      close_filesystem();
+      return result;
+   }
+
+   result = f_write(&file, buffer, buffer_size, &num_written);
+
+   if (result != FR_OK) {
+      log_warn("Failed to read %s (result = %d)", path, result);
+      close_filesystem();
+      return result;
+   }
+
+   result = f_close(&file);
+   if (result != FR_OK) {
+      log_warn("Failed to close %s (result = %d)", path, result);
+      close_filesystem();
+      return result;
+   }
+   log_info("%s writing complete", path);
+   close_filesystem();
+   return status;
+}
+
 int file_save(char *dirpath, char *name, char *buffer, unsigned int buffer_size, int saved_config_number) {
    FRESULT result;
    FIL file;
    unsigned int num_written = 0;
    unsigned int bytes_read = 0;
-   char path[256];
-   char comparison_path[256];
+   char path[MAX_STRING_SIZE];
+   char comparison_path[MAX_STRING_SIZE];
    char comparison_buffer[MAX_BUFFER_SIZE];
    char temp_buffer[MAX_BUFFER_SIZE];
    int status = 0;
@@ -765,14 +910,24 @@ int file_save(char *dirpath, char *name, char *buffer, unsigned int buffer_size,
 
    result = f_mkdir(path);
    if (result != FR_OK && result != FR_EXIST) {
-       log_warn("Failed to create dir %s (result = %d)",path, result);
+       log_warn("Failed to create dir1 %s (result = %d)",path, result);
    }
 
    if (dirpath != NULL) {
+       strcpy(temp_buffer, dirpath);
+       char *index = strchr(temp_buffer, '/');
+       if (index) {
+          *index = 0;
+       }
+       sprintf(path, "%s/%s/%s", SAVED_PROFILE_BASE, cpld->name, temp_buffer);
+       result = f_mkdir(path);
+       if (result != FR_OK && result != FR_EXIST) {
+           log_warn("Failed to create dir2 %s (result = %d)",path, result);
+       }
        sprintf(path, "%s/%s/%s", SAVED_PROFILE_BASE, cpld->name, dirpath);
        result = f_mkdir(path);
        if (result != FR_OK && result != FR_EXIST) {
-           log_warn("Failed to create dir %s (result = %d)", dirpath, result);
+           log_warn("Failed to create dir3 %s (result = %d)", dirpath, result);
        }
        if (saved_config_number == 0) {
           sprintf(path, "%s/%s/%s/%s.txt", SAVED_PROFILE_BASE, cpld->name, dirpath, name);
@@ -781,6 +936,17 @@ int file_save(char *dirpath, char *name, char *buffer, unsigned int buffer_size,
        }
        sprintf(comparison_path, "%s/%s/%s/%s.txt", PROFILE_BASE, cpld->name, dirpath, name);
    } else {
+       strcpy(temp_buffer, name);
+       char *index = strchr(temp_buffer, '/');
+       if (index) {
+          *index = 0;
+       }
+       sprintf(path, "%s/%s/%s", SAVED_PROFILE_BASE, cpld->name, temp_buffer);
+       result = f_mkdir(path);
+       if (result != FR_OK && result != FR_EXIST) {
+           log_warn("Failed to create dir2 %s (result = %d)",path, result);
+       }
+
        if (saved_config_number == 0) {
           sprintf(path, "%s/%s/%s.txt", SAVED_PROFILE_BASE, cpld->name, name);
        } else {
@@ -899,7 +1065,7 @@ int file_save(char *dirpath, char *name, char *buffer, unsigned int buffer_size,
 
 int file_restore(char *dirpath, char *name, int saved_config_number) {
    FRESULT result;
-   char path[256];
+   char path[MAX_STRING_SIZE];
 
    init_filesystem();
 
@@ -938,9 +1104,23 @@ int file_restore(char *dirpath, char *name, int saved_config_number) {
    return 1;
 }
 
-int file_save_config(char *resolution_name, int refresh, int scaling, int filtering, int current_frontend, int current_hdmi_mode) {
+int file_delete(char* path) {
+FRESULT result;
+       init_filesystem();
+       log_info("Deleting %s", path);
+       result = f_unlink(path);
+       if (result != FR_OK && result != FR_NO_FILE) {
+           log_warn("Failed to delete %s (result = %d)", path, result);
+           close_filesystem();
+           return result;
+       }
+       log_info("%s deleting complete", path);
+       return result;
+}
+
+int file_save_config(char *resolution_name, int refresh, int scaling, int filtering, int current_frontend, int current_hdmi_mode, int current_hdmi_auto, char *auto_workaround_path) {
    FRESULT result;
-   char path[256];
+   char path[MAX_STRING_SIZE];
    char buffer [16384];
    FIL file;
    unsigned int bytes_read = 0;
@@ -987,10 +1167,17 @@ int file_save_config(char *resolution_name, int refresh, int scaling, int filter
    sprintf((char*)(buffer + bytes_read), "\r\n");
    bytes_read += 2;
 
-   if (current_hdmi_mode == 0) {
-       sprintf((char*)(buffer + bytes_read), "\r\nhdmi_drive=1\r\n");
+   if (current_hdmi_auto == 0) {
+       sprintf((char*)(buffer + bytes_read), "\r\n#hdmi_auto=0\r\n");
    } else {
-       sprintf((char*)(buffer + bytes_read), "\r\nhdmi_drive=2\r\n");
+       sprintf((char*)(buffer + bytes_read), "\r\n#hdmi_auto=1\r\n");
+   }
+   bytes_read += strlen((char*) (buffer + bytes_read));
+
+   if (current_hdmi_mode == 0) {
+       sprintf((char*)(buffer + bytes_read), "hdmi_drive=1\r\n");
+   } else {
+       sprintf((char*)(buffer + bytes_read), "hdmi_drive=2\r\n");
        bytes_read += strlen((char*) (buffer + bytes_read));
        sprintf((char*)(buffer + bytes_read), "hdmi_pixel_encoding=%d\r\n", current_hdmi_mode - 1);
    }
@@ -1001,21 +1188,36 @@ int file_save_config(char *resolution_name, int refresh, int scaling, int filter
 
    sprintf((char*)(buffer + bytes_read), "\r\n#resolution=%s\r\n", resolution_name);
    bytes_read += strlen((char*) (buffer + bytes_read));
-   if (refresh == REFRESH_50) {
-       sprintf(path, "/Resolutions/50Hz/%s@50Hz.txt", resolution_name);
+
+   if (strcmp(resolution_name, DEFAULT_RESOLUTION) == 0) {
+       if (refresh == REFRESH_50) {
+           sprintf(path, "/Resolutions/50Hz/%s%s@50Hz.txt", auto_workaround_path, resolution_name);
+       } else {
+           sprintf(path, "/Resolutions/60Hz/%s%s@60Hz.txt", auto_workaround_path, resolution_name);
+       }
    } else {
-       sprintf(path, "/Resolutions/60Hz/%s@60Hz.txt", resolution_name);
+       if (refresh == REFRESH_50) {
+           sprintf(path, "/Resolutions/50Hz/%s@50Hz.txt", resolution_name);
+       } else {
+           sprintf(path, "/Resolutions/60Hz/%s@60Hz.txt", resolution_name);
+       }
    }
    log_info("Loading file: %s", path);
 
    result = f_open(&file, path, FA_READ);
-   if (result != FR_OK) {
-      log_warn("Failed to open resolution %s (result = %d)", path, result);
-      close_filesystem();
-      return 0;
-   }
-   result = f_read (&file, (char*) (buffer + bytes_read), 1024, &bytes_read2);
 
+   if (result != FR_OK) {
+       sprintf(path, "/Resolutions/%s.txt", resolution_name);
+       log_info("Not found, loading file: %s", path);
+       result = f_open(&file, path, FA_READ);
+       if (result != FR_OK) {
+          log_warn("Failed to open resolution %s (result = %d)", path, result);
+          close_filesystem();
+          return 0;
+       }
+   }
+
+   result = f_read (&file, (char*) (buffer + bytes_read), 1024, &bytes_read2);
 
    if (result != FR_OK) {
       log_warn("Failed to read resolution file %s (result = %d)", path, result);
@@ -1049,6 +1251,8 @@ int file_save_config(char *resolution_name, int refresh, int scaling, int filter
        }
    }
 
+   log_info(endptr);
+
    buffer[bytes_read]=0;
    result = f_open(&file, "/config.txt", FA_WRITE | FA_CREATE_ALWAYS);
    if (result != FR_OK) {
@@ -1078,6 +1282,7 @@ int file_save_config(char *resolution_name, int refresh, int scaling, int filter
    }
 
    close_filesystem();
+  
    log_info("Config.txt update is complete");
    return 1;
 }
@@ -1087,7 +1292,7 @@ int file_save_palette(char *name, char *buffer, unsigned int buffer_size) {
    FRESULT result;
    FIL file;
    unsigned int num_written = 0;
-   char path[256];
+   char path[MAX_STRING_SIZE];
    result = f_mkdir(PALETTES_BASE);
    if (result != FR_OK && result != FR_EXIST) {
        log_warn("Failed to create dir %s (result = %d)",PALETTES_BASE, result);
@@ -1119,7 +1324,7 @@ int file_save_palette(char *name, char *buffer, unsigned int buffer_size) {
 
 int create_and_scan_palettes(char names[MAX_NAMES][MAX_NAMES_WIDTH], uint32_t palette_array[MAX_NAMES][MAX_PALETTE_ENTRIES]) {
     int count = 0;
-    char path[256];
+    char path[MAX_STRING_SIZE];
     FRESULT res;
     DIR dir;
     static FILINFO fno;

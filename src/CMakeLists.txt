@@ -53,7 +53,7 @@ set( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --specs=nano.specs --specs=nosys.specs -u _
 
 #set( CMAKE_EXE_LINKER_FLAGS "-Wl,--gc-sections -Wl,--print-gc-sections -Wl,-unresolved-symbols=ignore-in-object-files -Wl,-T,${PROJECT_SOURCE_DIR}/rpi.ld" )
 
-set( CMAKE_EXE_LINKER_FLAGS "-Wl,--gc-sections -Wl,-T,${PROJECT_SOURCE_DIR}/rpi.ld" )
+set( CMAKE_EXE_LINKER_FLAGS "-Wl,--no-warn-rwx-segments,--gc-sections -Wl,-T,${PROJECT_SOURCE_DIR}/rpi.ld" )
 
 
 file( GLOB core_files
@@ -78,7 +78,9 @@ file( GLOB core_files
     capture_line_default_onebit_4bpp_8bpp.S
     capture_line_ntsc_8bpp.S
     capture_line_atariXL_8bpp.S
+    capture_line_c64_8bpp.S
     capture_line_fast_simple_16bpp.S
+    vid_cga_comp.c
     defs.h
     arm-exception.c
     cache.c

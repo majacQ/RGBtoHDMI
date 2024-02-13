@@ -28,7 +28,8 @@
 capture_line_fast_sixbits_4bpp:
         push    {lr}
         SETUP_VSYNC_DEBUG_R11
-        SKIP_PSYNC_NO_OLD_CPLD_FAST
+        SKIP_PSYNC_NO_OLD_CPLD
+        mov    r1, r1, lsr #2
 loop:
         WAIT_FOR_PSYNC_EDGE_FAST         // expects GPLEV0 in r4, result in r8
         CAPTURE_0_BITS_WIDE r11          // input in r8
@@ -41,8 +42,7 @@ loop:
 
         cmp     r1, #1
         stmeqia r0, {r7}
-        moveq   r0, r2
-        popeq   {pc}
+        popeq   {r0, pc}
 
         WAIT_FOR_PSYNC_EDGE_FAST         // expects GPLEV0 in r4, result in r8
         CAPTURE_0_BITS_WIDE r11          // input in r8
@@ -57,8 +57,7 @@ loop:
         subs    r1, r1, #2
         bne     loop
 
-        mov     r0, r2
-        pop     {pc}
+        pop     {r0, pc}
 
 preload_capture_line_fast_sixbits:
         SETUP_DUMMY_PARAMETERS
@@ -72,7 +71,8 @@ preload_capture_line_fast_sixbits:
 capture_line_fast_sixbits_8bpp:
         push    {lr}
         SETUP_VSYNC_DEBUG_R11_R12
-        SKIP_PSYNC_NO_OLD_CPLD_FAST
+        SKIP_PSYNC_NO_OLD_CPLD
+        mov    r1, r1, lsr #2
 loop_8bpp:
         WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
         CAPTURE_LOW_BITS_8BPP_WIDE r11                // input in r8
@@ -85,8 +85,7 @@ loop_8bpp:
 
         cmp     r1, #1
         stmeqia r0, {r5, r6}
-        moveq   r0, r2
-        popeq   {pc}
+        popeq   {r0, pc}
 
         WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
         CAPTURE_LOW_BITS_8BPP_WIDE r11                // input in r8
@@ -101,8 +100,7 @@ loop_8bpp:
         subs    r1, r1, #2
         bne     loop_8bpp
 
-        mov     r0, r2
-        pop     {pc}
+        pop     {r0, pc}
 
 preload_capture_line_fast_sixbits_8bpp:
         SETUP_DUMMY_PARAMETERS
@@ -117,39 +115,31 @@ preload_capture_line_fast_sixbits_8bpp:
 capture_line_fast_sixbits_16bpp:
         push    {lr}
         SETUP_VSYNC_DEBUG_16BPP_R11
-        SKIP_PSYNC_NO_OLD_CPLD_FAST
-        SETUP_TWELVE_BITS_MASK_R14
+        SKIP_PSYNC_NO_OLD_CPLD
+        mov    r1, r1, lsr #2
+        ldr    r14, =palette_data_16
 loop_16bpp:
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11               // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r5                // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11               // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r6                // input in r8
-
-        cmp     r1, #1
-        stmeqia r0, {r5, r6}
-        moveq   r0, r2
-        popeq   {pc}
-
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11               // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r7                // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11               // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                       // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r10               // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_SIX_BITS_16BPP r11 r5              // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_SIX_BITS_16BPP r11 r6             // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_SIX_BITS_16BPP r11 r7              // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_SIX_BITS_16BPP r11 r10              // input in r8
 
         stmia   r0!, {r5, r6, r7, r10}
-        subs    r1, r1, #2
+        subs    r1, r1, #1
         bne     loop_16bpp
 
-        mov     r0, r2
-        pop     {pc}
+        pop     {r0, pc}
 
 preload_capture_line_fast_sixbits_16bpp:
+        ldr    r0, =palette_data_16
+        mov    r1, #64
+preload_loop:
+        ldr    r2, [r0], #4
+        subs   r1, r1, #1
+        bne    preload_loop
         SETUP_DUMMY_PARAMETERS
         b       capture_line_fast_sixbits_16bpp

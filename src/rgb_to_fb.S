@@ -21,6 +21,7 @@
 .global dummyscreen
 .global elk_mode
 .global vsync_period
+.global vsync_width
 .global vsync_comparison_lo
 .global vsync_comparison_hi
 .global hsync_period
@@ -30,7 +31,9 @@
 .global hsync_width
 .global sync_detected
 .global last_sync_detected
+.global last_but_one_sync_detected
 .global delay_in_arm_cycles
+.global get_cycle_counter
 .global benchmarkRAM
 .global jitter_offset
 .global debug_value
@@ -38,7 +41,14 @@
 .global ntsc_status
 .global param_delay
 .global param_intensity
+.global param_sync_edge
 .global sw1_power_up
+.global osd_timer
+.global palette_data_16
+.global core_1_available
+.global start_core_1_code
+.global wait_for_source_fieldsync
+.global poll_soft_reset
 
 .global field_type_threshold
 .global elk_lo_field_sync_threshold
@@ -46,7 +56,7 @@
 .global odd_threshold
 .global even_threshold
 .global hsync_threshold
-.global other_hsync_threshold
+.global normal_hsync_threshold
 .global equalising_threshold
 .global frame_minimum
 .global line_minimum
@@ -61,13 +71,14 @@
 
 #ifdef USE_MULTICORE
 .global run_core
-.global read_pointer
-.global line_buffer
 #endif
+
+.global GPU_workspace
 
 .global capture_line_normal_1bpp_table
 .global capture_line_normal_3bpp_table
 .global capture_line_normal_6bpp_table
+.global capture_line_normal_odd_even_6bpp_table
 .global capture_line_normal_9bpplo_table
 .global capture_line_normal_9bpphi_table
 .global capture_line_normal_12bpp_table
@@ -79,14 +90,13 @@
 .global capture_line_half_odd_3bpp_table
 .global capture_line_half_even_3bpp_table
 
+.global capture_line_simple_6bpp_table
+.global capture_line_simple_9bpplo_table
+.global capture_line_simple_9bpplo_blank_table
+.global capture_line_simple_9bpphi_table
+.global capture_line_simple_12bpp_table
 
-.global capture_line_simple_12bpp_trailing_pos_table
-.global capture_line_simple_12bpp_leading_pos_table
-.global capture_line_simple_12bpp_trailing_neg_table
-.global capture_line_simple_12bpp_leading_neg_table
-.global capture_line_simple_12bpp_trailing_both_table
-.global capture_line_simple_12bpp_leading_both_table
-
+#define FRAME_COUNT_MAX 7
 
         .align 6               // so cache loads align
 rgb_to_fb:
@@ -129,6 +139,8 @@ rgb_to_fb:
         ldr    r3, [r0, #O_DETSYNCTYPE]
         str    r3, param_detected_sync_type
         ldr    r2, [r0, #O_VSYNCTYPE]
+        cmp    r2, #VSYNC_BLANKING
+        moveq  r2, #VSYNC_AUTO
         str    r2, param_vsync_type
         ldr    r2, [r0, #O_VIDEOTYPE]
         str    r2, param_video_type
@@ -148,14 +160,21 @@ rgb_to_fb:
         mov    r2, r2, lsl #12
         orr    r2, r2, lsl #16
         str    r2, param_intensity
+        ldr    r2, [r0, #O_AUTOSWITCH]
+        str    r2, param_autoswitch
+        ldr    r2, [r0, #O_TIMINGSET]
+        str    r2, param_timingset
+        ldr    r2, [r0, #O_SYNCEDGE]
+        str    r2, param_sync_edge
         ldr    r2, [r0, #O_FB_BASE]
         str    r2, param_framebuffer0
 
         ldr    r9, ntsc_status
-        and    r9, #NTSC_ARTIFACT_REQUIRED                     // last detected burst state
+        and    r9, #NTSC_LAST_ARTIFACT | NTSC_LAST_IIGS        // last detected burst state & last IIGS state
         ldr    r8, param_ntscphase            // 3 bits phase + 1 bit artifact on/off + 1 bit Y invert
         orr    r9, r9, r8
         str    r9, ntsc_status
+
 
         // Sanity check chars_per_line <= fb_pitch
         ldr    r3, param_fb_pitch
@@ -198,16 +217,32 @@ rgb_to_fb:
 skip_swap:
 #endif
         // Setup r4 as a constant
-        ldr    r4, =GPLEV0
+        bl     _get_GPLEV0_r4
 
         // Setup r3 with the flags/options parameter (as per before)
         mov    r3, r1
+        bl     set_hardware_id_r3
 
         // Setup r2 with the framebuffer pitch (as per before)
         ldr    r2, param_fb_pitch
 
-        // Setup r2 with the number of active characters per line (as per before)
+        // Setup r1 with the number of active characters per line (as per before) and adjust to number of psyncs required
         ldr    r1, param_chars_per_line
+    //    ldr    r9, param_palette_control
+    //    bic    r9, r9, #INHIBIT_PALETTE_DIMMING_16_BIT
+    //    cmp    r9, #PALETTECONTROL_ATARI_GTIA
+    //    movge  r1, r1, lsl #4
+        mov    r1, r1, lsl #3
+        ldr    r9, param_fb_sizex2
+        ands   r9, r9, #SIZEX2_DOUBLE_WIDTH
+        movne  r1, r1, lsr #1
+        ldr    r9, param_sample_width
+        cmp    r9, #SAMPLE_WIDTH_1
+        moveq  r1, r1, lsr #3
+        cmp    r9, #SAMPLE_WIDTH_3
+        moveq  r1, r1, lsr #2
+        cmp    r9, #SAMPLE_WIDTH_6
+        moveq  r1, r1, lsr #1
 
         tst    r3, #BIT_CLEAR
         blne   clear_screen
@@ -248,12 +283,18 @@ skip_double_check:
         ldr    r7, param_sample_width
         ldr    r8, param_palette_control
         cmp    r7, #SAMPLE_WIDTH_9LO        // is sample width SAMPLE_WIDTH_9LO, SAMPLE_WIDTH_9HI, SAMPLE_WIDTH_12 (from above test)
-        movge  r8, #PALETTECONTROL_OFF      // if so then force palette control to 0
+        andge  r8, r8, #INHIBIT_PALETTE_DIMMING_16_BIT //leaving PALETTECONTROL_OFF  if so then force palette control to 0 but preserve inhibit palette dimming
         str    r8, param_palette_control
+        bic    r8, r8, #INHIBIT_PALETTE_DIMMING_16_BIT
 
         ldr    r10, param_h_offset
-        cmp    r8, #PALETTECONTROL_ATARI_GTIA  // is it PALETTECONTROL_ATARI_GTIA ?
-        moveq  r10, r10, lsl #1                // if so double the offset as sample rate is 2x pixel rate
+        tst    r3, #BIT_NO_H_SCROLL
+        subeqs r10, r10, #1
+        moveq  r10, #1
+        movmi  r10, #1
+
+    //    cmp    r8, #PALETTECONTROL_ATARI_GTIA
+    //    movge  r10, r10, lsl #1                // if so double the offset as sample rate is 2x pixel rate
         add    r10, r10, #1                    // first psync test is wait for a zero after csync
         str    r10, param_h_offset
 
@@ -268,9 +309,9 @@ skip_double_check:
 
         orr    r10, r7, r8, lsl #1    // slow index in r10 now 0-9
         tst    r9, #2                 // double width?
-        addne  r10, r10, #14          // slow index in r10 now 10-19
+        addne  r10, r10, #(NUM_CONTROLS << 1)          // slow index in r10 now 10-19
 
-        add    r7, r7, #28            // main index initially points to fast 4bpp or fast 8bpp (20-21)
+        add    r7, r7, #(NUM_CONTROLS << 2)            // main index initially points to fast 4bpp or fast 8bpp (20-21)
 
         cmp    r8, #0                 // palette control?
         tsteq  r9, #3                 // double size?
@@ -294,7 +335,7 @@ skip_double_check:
         ldr    r9, =0x48444d49              // "HDMI" sentinel
         str    r9, [r8]
 
-        mov    r8, #5                     // number of frames before h and v sync timing is analysed
+        mov    r8, #FRAME_COUNT_MAX                // number of frames before h and v sync timing is analysed
         str    r8, frame_countdown
 
         ldr    r8, dpms_state
@@ -308,6 +349,15 @@ skip_double_check:
 
         .align 6               // so cache loads align
 frame:
+
+        ldr    r8, sync_detected
+        cmp    r8, #0
+        bne    no_refresh
+        push   {r0-r12}
+        bl     refresh_cpld
+        pop    {r0-r12}
+no_refresh:
+
         ldr    r8, =inBandPointer
         ldr    r9, =inBandData
         str    r9, [r8]
@@ -372,12 +422,15 @@ buffer_chosen:
         bic    r3, r3, #BIT_ELK         // clear elk mode
         ldr    r8, param_vsync_type
         cmp    r8, #VSYNC_AUTO
+        cmpne  r8, #VSYNC_POLARITY
         beq    auto_detect_vsync
         cmp    r8, #VSYNC_INTERLACED_160  // interlaced half line
         orreq  r3, r3, #BIT_ELK
         ble    get_field_type           // branch for both types of interlace
-        tst    r3, #BIT_MODE_DETECT
-        bne    auto_detect_vsync        // "if mode 7 detect enabled then don't use non-interlaced mode as it messes up mode 7 switching"
+
+        ldr    r7, param_autoswitch
+        cmp    r7, #AUTOSWITCH_MODE7
+        beq    auto_detect_vsync        // "if mode 7 detect enabled then don't use non-interlaced mode as it messes up mode 7 switching"
         orr    r3, r3, #BIT_ELK
         bic    r3, r3, #BIT_FIELD_TYPE  // Odd, clear bit
         bge    got_field_type           // if non interlaced then always elk and odd field
@@ -412,6 +465,17 @@ got_field_type:
         // - with R3=10: 22.0us/54.0us
         //
         // Hence we use thresholds of 22.5us and 54.5us
+
+        ldr    r0, param_timingset
+
+        ldr    r9, param_autoswitch
+        cmp    r9, #AUTOSWITCH_MODE7
+        bicne  r3, #BIT_INHIBIT_MODE_DETECT   //inhibit mode detect only works in mode7
+        bne    no_mode7_test
+        ldr    r8, sync_detected
+        cmp    r8, #0
+        beq    no_mode_test
+
         tst    r3, #BIT_FIELD_TYPE
         ldreq  r5, odd_threshold     // Use 22.5us threshold in odd field
         ldrne  r5, even_threshold    // Use 54.5us threshold in even field
@@ -419,15 +483,53 @@ got_field_type:
         movlt  r0, #0         // Modes 0-6
         movge  r0, #1         // Mode 7
 
-        ldr    r9, sync_detected
-        cmp    r9, #0
-        bne    normal_mode_test
-        // preserve existing mode 7 state if no sync
-        tst    r3, #BIT_MODE7
-        moveq  r0, #0         // Modes 0-6
-        movne  r0, #1         // Mode 7
+no_mode7_test:
+        cmp    r9, #AUTOSWITCH_VSYNC
+        bne    no_vsync_test
+glitch_detected:
+        mov    r8, #VERSION_MASK
+        str    r8, [r4, #-(GPLEV0_OFFSET - GPCLR0_OFFSET)]               //briefly switch to vsync on psync by clearing version bit
+        ldr    r9, [r4]  // dummy read for delay
+        ldr    r9, [r4]  // dummy read for delay
+        ldr    r6, [r4]
+        ldr    r9, [r4]  // dummy read for delay
+        ldr    r7, [r4]
+        str    r8, [r4, #-(GPLEV0_OFFSET - GPSET0_OFFSET)]               //restore version bit
+        eor    r6, r6, r7            // eor together in case of glitches
+        tst    r6, #PSYNC_MASK
+        bne    glitch_detected
+        tst    r7, #PSYNC_MASK
+        moveq  r0, #0             //set 1
+        movne  r0, #1             //set 2
+        b      no_mode_test
 
-normal_mode_test:
+no_vsync_test:
+        cmp    r9, #AUTOSWITCH_IIGS
+        cmpne  r9, #AUTOSWITCH_IIGS_MANUAL
+        bne    no_mode_test
+        ldr    r10, frame_countdown
+        cmp    r10, #0
+        bne    no_mode_test
+        ldr    r7, vsync_detected
+        ldr    r8, ntsc_status
+        mov    r10, r8
+        cmp    r7, #IIGS_DETECTED_LINE_COUNT
+        biclt  r8, #NTSC_LAST_IIGS   // set1
+        orrge  r8, #NTSC_LAST_IIGS   // set2
+        str    r8, ntsc_status
+        eor    r10, r10, r8
+        mov    r8, r8, lsr #NTSC_LAST_IIGS_SHIFT
+        and    r8, r8, #1
+        cmp    r9, #AUTOSWITCH_IIGS
+        moveq  r0, r8
+        moveq  r10, #0  //so branch test fails
+        tst    r10, #NTSC_LAST_IIGS
+        beq    no_mode_test
+        mov    r0, r8
+        push   {r0 - r12}
+        bl     set_timingset
+        pop    {r0 - r12}
+no_mode_test:
         tst    r3, #BIT_PROBE
         bne    exit
         tst    r3, #BIT_CALIBRATE
@@ -437,9 +539,8 @@ normal_mode_test:
         // Note: macro uses r5&r6 as a scratch register
         ldr    r8, [r4]
         ldr    r9, sw1_power_up
-        KEY_PRESS_DETECT SW1_MASK, RET_SW1, sw1counter
-        KEY_PRESS_DETECT SW2_MASK, RET_SW2, sw2counter
-        KEY_PRESS_DETECT SW3_MASK, RET_SW3, sw3counter
+
+        bl     do_key_press_detect
 
         tst    r0, #RET_SW1
         moveq  r8, #0
@@ -456,35 +557,40 @@ skip_switch_test:
         beq    skip_interlace_test
 
         ldr    r9, frame_countdown
-        cmp    r9, #5
+        cmp    r9, #FRAME_COUNT_MAX
         bne    not_first_frame
         subs   r9, r9, #1
         str    r9, frame_countdown
         ldr    r9, param_detected_sync_type
         tst    r9, #SYNC_BIT_INTERLACED
-        tstne  r3, #BIT_OSD
+        tstne  r3, #BIT_OSD  |  BIT_SKIP_ALT_FRAME
         tstne  r3, #BIT_FIELD_TYPE    // test for interlaced sync with OSD on and wrong field
         bne    frame                  // wait for next fieldsync so always start on the same field to prevent interlace 'bounce'
+
 not_first_frame:
         cmp    r9, #0
         bne    skip_interlace_test
 
-        tst    r3, #BIT_MODE_DETECT // Have we been told to exit on mode change
-        beq    do_interlace_test
-
         tst    r3, #BIT_INHIBIT_MODE_DETECT
-        bne    force_interlace_test
+        bne    skip_mode_detect
 
-        tst    r3, #BIT_MODE7
-        moveq  r5, #0         // Modes 0-6
-        movne  r5, #1         // Mode 7
+        ldr    r5, param_timingset
         cmp    r5, r0         // Check if we have changed mode
         bne    exit           // If so, then bail, as the frame buffer needs to be resized
-        b      force_interlace_test
+skip_mode_detect:
 
-do_interlace_test:
+        ldr    r9, param_autoswitch
+        cmp    r9, #AUTOSWITCH_MODE7
+        beq    force_interlace_test
+
         ldr    r9, param_video_type
         cmp    r9, #VIDEO_INTERLACED
+        beq    force_interlace_test
+
+        ldr    r9, param_vsync_type
+        cmp    r9, #VSYNC_INTERLACED
+        beq    force_interlace_test
+        cmp    r9, #VSYNC_INTERLACED_160
         bne    skip_interlace_test
 
 force_interlace_test:
@@ -523,40 +629,38 @@ skip_interlace_test:
         add    r9, r9, r8
         add    r11, r11, r9
 
+        ldr    r7, last_but_one_sync_detected
         ldr    r8, last_sync_detected
         ldr    r9, sync_detected
+        str    r8, last_but_one_sync_detected
         str    r9, last_sync_detected
         ldr    r10, param_border
-        cmp    r8, #0
+        cmp    r7, #0
+        cmpne  r8, #1
         cmpne  r9, #1
         cmpne  r10, #0
         beq    no_sync_loss
         bl     clear_screen              // clear non-zero border on loss of sync
         b      skip_all_lines
 no_sync_loss:
-
-        cmp    r8, #0
+        cmp    r7, #0
+        cmpeq  r8, #0
         cmpeq  r9, #1
-        andeq  r0, r3, #BIT_MODE7
-        orreq  r0, #RET_SYNC_TIMING_CHANGED
+        ldreq  r0, param_timingset
+        orreq  r0, #RET_SYNC_STATE_CHANGED
         beq    exit                       // if sync just returned, bail to allow recalculation of sampling clock etc
 
         cmp    r8, #0                         // if sync lost for 2 fields then increase hsync threshold
         cmpeq  r9, #0
-        ldreq  r5, other_hsync_threshold
+        ldreq  r5, normal_hsync_threshold
         streq  r5, hsync_threshold
 
         // Save a copy of the frame buffer base
         push   {r11}
 
-#if defined(USE_CACHED_COMPARISON_BUFFER)
-        ldr r5, =dummyscreen
-        sub r5, r5, r11                   // put comparison buffer in cached memory
-#else
         ldr    r5, param_framebuffer0
         ldr    r6, param_framebuffer1
-        sub    r5, r6, r5                 // put comparison buffer in uncached screen memory
-#endif
+        sub    r5, r6, r5
         str    r5, video_offset
 
         ldr    r5, param_v_offset
@@ -566,7 +670,7 @@ no_sync_loss:
         bne    skip_fix_vsync_jitter
 
 
-        SHOW_VSYNC
+        bl     show_vsync
         WAIT_FOR_CSYNC_0_LONG
         WAIT_FOR_CSYNC_1_LONG
 
@@ -660,31 +764,31 @@ fixupmodes:
         tst    r3, #BIT_FIELD_TYPE
         subne  r5, r5, #1     // skip one less line in even fields
 is_elk:
-        CLEAR_VSYNC
+        bl     clear_vsync
         ldr    r6, param_nlines
         add    r5, r5, r6
         str    r5, total_lines
-        str    r5, vsync_line          // default for vsync line if undetectable in blanking area
+        //str    r5, vsync_line          // default for vsync line if undetectable in blanking area
+        mov    r9, #0
 skip_line_loop:
+        str    r9, hsync_measured
         cmp    r5, r6
         ble    skip_line_loop_exit
-        SHOW_VSYNC
+        bl     show_vsync
         WAIT_FOR_CSYNC_0_LONG
+        READ_CYCLE_COUNTER r12
         WAIT_FOR_CSYNC_1_LONG
+        READ_CYCLE_COUNTER r10
+        subs   r9, r10, r12
+        rsbmi  r9, r9, #0
         subs   r5, r5, #1
         b      skip_line_loop
 skip_line_loop_exit:
 
         push   {r1-r5, r11}
-        push   {r3}
+        ldr    r12, capture_address
+        sub    r12, r12, #4
         orr    r3, r3, #BIT_OSD
-        ldr    r12, capture_address
-        sub    r12, r12, #4
-        // Call preload capture line function (runs all paths of capture code to preload it into cache - OSD version)
-        blx    r12
-        pop    {r3}
-        ldr    r12, capture_address
-        sub    r12, r12, #4
         // Call preload capture line function (runs all paths of capture code to preload it into cache)
         blx    r12
         pop    {r1-r5, r11}
@@ -716,6 +820,7 @@ mod10:
 
         mov    r10, #0
         str    r10, detectedlinecount
+        str    r10, vsync_detected
         //preload some variables into cache
         ldr    r10, last_hsync_time
         ldr    r10, hsync_period
@@ -724,381 +829,44 @@ mod10:
         ldr    r10, param_fb_sizex2
         ldr    r10, vsync_line
 
-        orr    r3, r3, #BIT_NO_SKIP_HSYNC
-        bic    r3, #BITDUP_FFOSD_DETECTED
-        b      process_line_loop
+        push   {r3}
 
-        .align 6               // so cache loads align
-
-process_line_loop:
-
-        SHOW_VSYNC
-
-        // Preserve the state used by the outer code
-        push   {r1-r9, r11, r12}
-
-        // The capture line function is provided the following:
-        //   r0 = pointer to current line in frame buffer
-        //   r1 = number of complete psync cycles to capture (=param_chars_per_line)
-        //   r2 = frame buffer line pitch in bytes (=param_fb_pitch)
-        //   r3 = flags register
-        //   r4 = GPLEV0 constant
-        //   r5 = line number count down to 0 (initial value =param_nlines)
-        //   r6 = scan line count modulo 10
-        //   r7 = number of psyncs to skip
-        //   r8 = frame buffer height (=param_fb_height)
-        //   r9 = hsync scroll limits
-        // All registers are available as scratch registers (i.e. nothing needs to be preserved)
-
+        bic    r3, #BITDUP_ENABLE_GREY_DETECT | BITDUP_ENABLE_FFOSD
+        bic    r3, #BITDUP_RGB_INVERT | BITDUP_Y_INVERT
         ldr    r0, ntsc_status
-        ands   r0, #NTSC_HDMI_BLANK
-        biceq  r3, r3, #BITDUP_ENABLE_GREY_DETECT
+        tst    r0, #NTSC_HDMI_BLANK_ENABLE
         orrne  r3, r3, #BITDUP_ENABLE_GREY_DETECT
-        bic    r3, #BITDUP_LINE_CONDITION_DETECTED
+        tst    r0, #NTSC_FFOSD_ENABLE
+        orrne  r3, r3, #BITDUP_ENABLE_FFOSD
+        tst    r0, #NTSC_RGB_INVERT
+        orrne  r3, r3, #BITDUP_RGB_INVERT
+        tst    r0, #NTSC_Y_INVERT
+        orrne  r3, r3, #BITDUP_Y_INVERT
 
-        // Setup parameters
-        // Load the address of the capture_line function into r12
+        bic    r3, #BITDUP_IIGS_DETECT
+        ldr    r0, param_autoswitch
+        cmp    r0, #AUTOSWITCH_IIGS
+        cmpne  r0, #AUTOSWITCH_IIGS_MANUAL
+        orreq  r3, #BITDUP_IIGS_DETECT
 
-        mov    r0, r11
+        bic    r3, #BITDUP_FFOSD_DETECTED
+
         tst    r3, #BIT_OSD
         orrne  r3, r3, #BIT_NO_SCANLINES   //disable scanlines if OSD on
-        // Call capture line function
-        blx    r12 // exits with h sync timestamp in r0
 
-        ldr    r1, detectedlinecount
-        tst    r3, #BITDUP_LINE_CONDITION_DETECTED
-        addne  r1, r1, #1
-        strne  r1, detectedlinecount
+        ldr    r0, param_palette_control
+        tst    r0, #INHIBIT_PALETTE_DIMMING_16_BIT
+        bicne  r3, r3, #BIT_OSD
 
-
-        // Restore the state used by the outer code
-        tst    r3, #BITDUP_FFOSD_DETECTED
-        pop    {r1-r9, r11, r12}
-        biceq  r3, r3, #BITDUP_FFOSD_DETECTED  // persist bit after r3 restored
-        orrne  r3, r3, #BITDUP_FFOSD_DETECTED
-        ldr    r10, last_hsync_time
-        str    r0, last_hsync_time
-        subs   r10, r0, r10
-        rsbmi  r10, r10, #0
-        str    r10, hsync_period
-        ldr    r0, param_nlines
-        cmp    r0, r5                 //ignore 1st line as time undefined
-        ldrne  r0, total_hsync_period
-        addne  r0, r0, r10
-        strne  r0, total_hsync_period
-
-        ldr    r10, param_fb_sizex2
-        tst    r10, #SIZEX2_DOUBLE_HEIGHT
-        // Skip a whole line to maintain aspect ratio
-        addne  r11, r11, r2, lsl #1
-        addeq  r11, r11, r2
-        add    r6, r6, #1
-        cmp    r6, #10
-        moveq  r6, #0
-
-        subs   r5, r5, #1
-        bne    process_line_loop
-
-        ldr    r5, flag_state
-        and    r8, r5, #BITDUP_FFOSD_DETECTED
-        and    r5, r5, #BIT_OSD
-
-        tst    r3, #BITDUP_FFOSD_DETECTED
-        orrne  r3, r3, #BIT_OSD
-        biceq  r3, r3, #BIT_OSD
-        orreq  r3, r5
-
-        bic    r3, r3, #BITDUP_FFOSD_DETECTED
-        orr    r3, r3, r8
-
-        tst    r3, #BIT_INHIBIT_MODE_DETECT
-        bicne  r3, #BIT_MODE7
-        pop    {r11}
-
-skip_all_lines:
-        push   {r1-r12}
-        ldr    r7, detectedlinecount
-
-        ldr    r9, param_palette_control
-        cmp    r9, #PALETTECONTROL_NTSCARTIFACT_BW_AUTO
-        bne    check_dpms
-
-        ldr    r8, param_fb_sizex2
-        tst    r8, #SIZEX2_DOUBLE_WIDTH
-        moveq  r8, #ARTIFACT_DETECTED_LINE_COUNT
-        movne  r8, #(ARTIFACT_DETECTED_LINE_COUNT << 1)
-
-        ldr    r9, ntsc_status
-        mov    r11, r9
-        cmp    r7, r8
-        bic    r9, r9, #NTSC_ARTIFACT_REQUIRED
-        orrge  r9, r9, #NTSC_ARTIFACT_REQUIRED
-
-        eor    r11, r11, r9
-        tst    r11, #NTSC_ARTIFACT_REQUIRED
-        mov    r11, r9, lsr #NTSC_ARTIFACT_REQUIRED_SHIFT
-        and    r11, r11, #NTSC_ARTIFACT
-
-        bicne  r9, r9, #NTSC_ARTIFACT
-        orrne  r9, r9, r11
-        str    r9, ntsc_status
-
-        b      done_ntsc_auto
-
-check_dpms:
-        ldr    r8, dpmsframecount
-        tst    r3, #BIT_OSD                  //if osd on then disable grey screen
-        movne  r8, #0
-        ldr    r9, dpms_state
-        cmp    r7, #GREY_DETECTED_LINE_COUNT
-        movlt  r8, #0
-        addge  r8, r8, #1
-        cmp    r8, #DPMS_FRAME_COUNT
-        strle  r8, dpmsframecount
-        movlt  r0, #0
-        movge  r0, #1
-        str    r0, dpms_state
-        cmp    r0, r9
-        blne   DPMS
-
-done_ntsc_auto:
-        pop    {r1-r12}
-
-        ldr    r8, frame_countdown
-        subs   r8, r8, #1
-        strpl  r8, frame_countdown
-        bpl    skip_sync_time_test
-
-        ldr    r8, sync_detected
-        cmp    r8, #0
-        beq    skip_sync_time_test           // if no sync then timing comparison is meaningless
-
-        tst    r3, #BIT_OSD | BIT_CALIBRATE | BIT_PROBE
-        bne    skip_sync_time_test
-
-        ldr    r7, hsync_comparison_lo
-        ldr    r8, hsync_comparison_hi
-        cmp    r7,r8
-        beq    skip_sync_time_test            //no sensible window
-
-        and    r0, r3, #BIT_MODE7
-        orr    r0, #RET_SYNC_TIMING_CHANGED
-
-        ldr    r6, hsync_period
-        ldr    r7, hsync_comparison_lo
-        ldr    r8, hsync_comparison_hi
-        cmp    r6, r7
-        blt    exit
-        cmp    r6, r8
-        bgt    exit
-
-        ldr    r6, vsync_period
-        ldr    r7, vsync_comparison_lo
-        ldr    r8, vsync_comparison_hi
-        cmp    r6, r7
-        blt    exit
-        cmp    r6, r8
-        bgt    exit
-
-//        ble    no_test_half
-//        mov    r6, r6, lsr #1                // workaround to check for half the time in case frame dropped due to genlock or palette update taking too long
-//        cmp    r6, r7
-//        blt    exit
-//        cmp    r6, r8
-//        bgt    exit
-//no_test_half:
-
-        tst    r3, #BIT_NO_AUTOSWITCH
-        bne    skip_sync_time_test
-
-        ldr    r8, param_sync_type
-        tst    r8, #SYNC_BIT_COMPOSITE_SYNC       //set if composite so don't check vsync polarity
-        bne    skip_sync_time_test
-
-        orr    r0, #RET_VSYNC_POLARITY_CHANGED
-
-        mov    r8, #VERSION_MASK
-        str    r8, [r4, #(GPCLR0 - GPLEV0)]               //briefly switch to vsync on psync by clearing version bit
-        ldr    r9, [r4]  // dummy read for delay
-        ldr    r6, [r4]
-        ldr    r9, [r4]  // dummy read for delay
-        ldr    r7, [r4]
-        str    r8, [r4, #(GPSET0 - GPLEV0)]               //restore version bit
-
-        ldr    r8, param_sync_type
-        tst    r8, #SYNC_BIT_VSYNC_INVERTED
-        eorne  r6, r6, #PSYNC_MASK
-        eorne  r7, r7, #PSYNC_MASK
-        orr    r6, r6, r7            // or together in case of glitches
-        tst    r6, #PSYNC_MASK
-        beq    exit
-
-skip_sync_time_test:
-
-        push   {r1-r5, r11}
-        ldr    r9, =paletteFlags
-        ldr    r8, [r9]
-        bic    r8, r8, #BIT_SET_MODE2_16COLOUR   // mode 2 emulation flag
-        bic    r8, r8, #BIT_MODE2_PALETTE
-        mov    r9, #0           // palette changed flag
-
-        tst    r8, #BIT_IN_BAND_DETECTED
-        beq    noInBandData
-
-        adrl    r10, customPalette
-        ldr    r12, =inBandData
-        ldrb   r11, [r12], #1   //read 1 byte of command data
-        cmp    r11, #0
-        beq    noInBandData
-        cmp    r11, #76        //sanity check on size
-        bgt    noInBandData
-        mov    r11, r11, lsr #1
-        ORR    r8, #BIT_SET_MODE2_16COLOUR          // mode 2 emulation enabled
-        ORR    r8, #BIT_MODE2_PALETTE
-commandloop:
-        ldrb   r1, [r12], #1   //read 1 byte of command data
-        and    r0, r1, #0x0f
-        ldrb   r1, [r12], #1   //read 1 byte of command data
-        and    r3, r1, #0xf0
-        orr    r0, r0, r3, lsl #4
-        and    r3, r1, #0x0f
-        orr    r0, r0, r3, lsl #16
-        orr    r0, r0, r0, lsl #4
-
-        ldr    r2, [r10]
-        str    r0, [r10], #4
-
-        cmp    r0, r2
-        movne  r9, #1
-
-        subs   r11, r11, #1
-        bne    commandloop
-
-noInBandData:
-
-        ldr    r10, =paletteFlags
-        ldr    r7, [r10]
-        str    r8, [r10]
-        cmp    r9, #0
-        cmpeq  r7, r8
-        blne   osd_update_palette
-
-        pop    {r1-r5,r11}
-
-        // Update the OSD in Mode 0..6
-
-        tst    r3, #BIT_CLEAR
-        bne    force_osd_update
-        ldr    r0, param_video_type
-        cmp    r0, #VIDEO_TELETEXT
-        beq    skip_osd_update
-        tst    r3, #BIT_OSD
-        beq    skip_osd_update
-
-        push   {r1-r5, r11}
-        mov    r0, #0 //do not force genlock
-        bl     recalculate_hdmi_clock_line_locked_update
-        bl     wait_for_vsync               //wait for field sync as sometimes the update will be on the ragged edge of finishing during field sync causing glitches
-        pop    {r1-r5, r11}
-        subs   r6, r6, r7
-        rsbmi  r6, r6, #0
-        ldr    r7, field_type_threshold
-        cmp    r6, r7
-        biclt  r3, r3, #BIT_FIELD_TYPE1  // Odd, clear bit
-        orrge  r3, r3, #BIT_FIELD_TYPE1  // Even, set bit
-force_osd_update:
-        push   {r1-r5, r11}
-        mov    r0, r11
-        mov    r1, r2                       // bytes per line
-        bl     osd_update_fast
-        pop    {r1-r5, r11}
-skip_osd_update:
-        bic    r3, r3, #BIT_CLEAR
-
-#ifdef MULTI_BUFFER
-        // Update the last drawn buffer
-        mov    r0, r3, lsr #OFFSET_CURR_BUFFER
-        and    r0, #3
-        bic    r3, r3, #MASK_LAST_BUFFER
-        orr    r3, r3, r0, lsl #OFFSET_LAST_BUFFER
-        // Flip to it on next V SYNC
-        FLIP_BUFFER
-#endif
-        push   {r1-r5, r11}
-
-        mov    r0, #0 //do not force genlock
-        bl     recalculate_hdmi_clock_line_locked_update
-
-        // Returns:
-        //   r0=0 genlock disabled           - LED off
-        //   r0=1 genlock enabled (unlocked) - LED flash
-        //   r0=2 genlock enabled (locked)   - LED on
-
-        READ_CYCLE_COUNTER r1
-
-        mov    r2, #LED1_MASK
-        tst    r0, #1         // should LED flash?
-        tstne  r1, #(1 << 26) // flash rate ~ 8Hz
-        tsteq  r0, #2         // should LED be on?
-        ldrne  r1, =GPSET0    // LED on
-        ldreq  r1, =GPCLR0    // LED off
-        str    r2, [r1]
-
-        pop    {r1-r5, r11}
-
-        // Loop back if required number of fields has not been reached
-        // or if negative (capture forever)
-        ldr    r5, param_ncapture
-        cmp    r5, #0
-        blt    frame
-        subs   r5, #1
-        str    r5, param_ncapture
-        bne    frame
-
-        // Setup the response code
-        and    r0, r3, #BIT_MODE7
-        orr    r0, #RET_EXPIRED
-
-       // Return
-exit:
-#ifdef MULTI_BUFFER
-        // Save the old buffer state before exiting
-        and    r3, r3, #MASK_LAST_BUFFER
-        str    r3, buffer_state
-        // Return the current buffer state
-        orr    r0, r0, r3
-#endif
-        push   {r0}
-        ldr    r9, ntsc_status
-        tst    r9, #NTSC_ARTIFACT
-        moveq  r0,#0
-        movne  r0,#1
-        bl     set_ntsccolour
-        pop    {r0,r4-r12, lr}
-        mov    pc, lr
-
-key_press_reset:
-        push   {r4-r12, lr}
-        ldr    r4, =GPLEV0
-        ldr    r8, [r4]
-        mov    r0, #0
-        tst    r8, #SW1_MASK
-        orreq  r0, r0, #1
-        tst    r8, #SW2_MASK
-        orreq  r0, r0, #2
-        tst    r8, #SW3_MASK
-        orreq  r0, r0, #4
-        pop    {r4-r12, lr}
-        mov     pc, lr
-
-// ======================================================================
-// Local Variables
-// ======================================================================
-
-
+        bic    r3, r3, #BIT_NO_SKIP_HSYNC
+        b      process_line_loop
         .align 6
 
-        .ltorg
+GPU_workspace:
+        .word 0
+        .word 0
+        .word 0
+        .word 0
 
 param_fb_pitch:
         .word  0
@@ -1169,28 +937,13 @@ param_delay:
 param_intensity:
         .word 0
 
-hsync_period:
+param_autoswitch:
         .word 0
 
-total_hsync_period:
+param_timingset:
         .word 0
 
-last_hsync_time:
-        .word 0
-
-vsync_line:
-        .word 0
-
-capture_address:
-        .word 0
-
-sw1counter:
-        .word 0
-
-sw2counter:
-        .word 0
-
-sw3counter:
+param_sync_edge:
         .word 0
 
 param_framebuffer0:
@@ -1213,6 +966,465 @@ buffer_state:
 buffer_total:
         .word 1
 
+ntsc_status:
+        .word 0
+.ltorg
+
+        .align  6
+
+process_line_loop:
+
+        bl     show_vsync
+        // Preserve the state used by the outer code
+        push   {r1, r2, r4-r9, r11, r12}
+
+        // The capture line function is provided the following:
+        //   r0 = pointer to current line in frame buffer
+        //   r1 = number of complete psync cycles to capture (=param_chars_per_line)
+        //   r2 = frame buffer line pitch in bytes (=param_fb_pitch)
+        //   r3 = flags register
+        //   r4 = GPLEV0 constant
+        //   r5 = line number count down to 0 (initial value =param_nlines)
+        //   r6 = scan line count modulo 10
+        //   r7 = number of psyncs to skip
+        //   r8 = frame buffer height (=param_fb_height)
+        //   r9 = hsync scroll limits
+        // All registers are available as scratch registers (i.e. nothing needs to be preserved)
+
+        mov    r0, r11
+
+        bic    r3, #BITDUP_LINE_CONDITION_DETECTED
+
+        tst    r3, #BIT_NO_SKIP_HSYNC
+        ldreq  r1, [r0]
+        streq  r1, [r0]
+
+        moveq  r1, #8   //number of psyncs to capture
+        moveq  r7, #4  //number of psyncs to skip
+        ldreq   r0, =(dummyscreen + 1024)
+        // Call capture line function
+        blx    r12 // exits with h sync timestamp in r0
+
+        // Restore the state used by the outer code
+        pop    {r1, r2, r4-r9, r11, r12}
+        tst    r3, #BIT_NO_SKIP_HSYNC
+        orreq  r3, r3, #BIT_NO_SKIP_HSYNC
+        biceq  r3, #BITDUP_FFOSD_DETECTED
+        beq    process_line_loop
+
+        mov    r14, #0
+        tst    r3, #BITDUP_IIGS_DETECT
+        movne  r10, #VERSION_MASK
+        strne  r10, [r4, #-(GPLEV0_OFFSET - GPCLR0_OFFSET)]               //briefly switch to vsync on psync by clearing version bit
+        ldrne  r14, [r4]  // dummy read for delay
+        ldrne  r14, [r4]  // dummy read for delay
+        ldrne  r14, [r4]
+        strne  r10, [r4, #-(GPLEV0_OFFSET - GPSET0_OFFSET)]               //restore version bit
+        ldrne  r10, vsync_detected
+        tst    r14, #CSYNC_MASK
+        addne  r10, r10, #1
+        strne  r10, vsync_detected
+
+        tst    r3, #BITDUP_LINE_CONDITION_DETECTED
+        ldrne  r10, detectedlinecount
+        addne  r10, r10, #1
+        strne  r10, detectedlinecount
+
+        ldr    r10, last_hsync_time
+        str    r0, last_hsync_time
+        subs   r10, r0, r10
+        rsbmi  r10, r10, #0
+        str    r10, hsync_period
+        ldr    r0, param_nlines
+        cmp    r0, r5                 //ignore 1st line as time undefined
+        ldrne  r0, total_hsync_period
+        addne  r0, r0, r10
+        strne  r0, total_hsync_period
+
+        ldr    r10, param_fb_sizex2
+        tst    r10, #SIZEX2_DOUBLE_HEIGHT
+        // Skip a whole line to maintain aspect ratio
+        addne  r11, r11, r2, lsl #1
+        addeq  r11, r11, r2
+        add    r6, r6, #1
+        cmp    r6, #10
+        moveq  r6, #0
+
+        subs   r5, r5, #1
+        bne    process_line_loop
+
+        ldr    r5, flag_state
+        and    r5, r5, #BIT_OSD
+        and    r7, r3, #BIT_INHIBIT_MODE_DETECT
+        tst    r3, #BITDUP_FFOSD_DETECTED
+        pop    {r3}
+        orrne  r3, r3, #BIT_OSD       //enable OSD if FFOSD detected
+        biceq  r3, r3, #BIT_OSD
+        orreq  r3, r5                 //otherwise restore original OSD state
+        bic    r3, r3, #BIT_INHIBIT_MODE_DETECT
+        orr    r3, r3, r7    //persist inhibit after R3 restored
+
+        tst    r3, #BIT_INHIBIT_MODE_DETECT
+        movne  r7, #0
+        strne  r7, param_timingset
+        pop    {r11}
+
+skip_all_lines:
+        push   {r1-r12}
+        ldr    r7, detectedlinecount
+
+        ldr    r9, param_palette_control
+        bic    r9, r9, #INHIBIT_PALETTE_DIMMING_16_BIT
+        cmp    r9, #PALETTECONTROL_NTSCARTIFACT_BW_AUTO
+        bne    check_dpms
+
+        ldr    r6, param_fb_sizex2
+        tst    r6, #SIZEX2_DOUBLE_WIDTH
+        moveq  r8, #ARTIFACT_DETECTED_LINE_COUNT
+        movne  r8, #1
+
+        ldr    r9, ntsc_status
+        mov    r11, r9
+        cmp    r7, r8
+        bic    r9, r9, #NTSC_LAST_ARTIFACT
+        orrge  r9, r9, #NTSC_LAST_ARTIFACT
+
+        tst    r6, #SIZEX2_DOUBLE_WIDTH
+        eorne  r9, r9, #NTSC_LAST_ARTIFACT
+
+        eor    r11, r11, r9
+        tst    r11, #NTSC_LAST_ARTIFACT
+        mov    r11, r9, lsr #(NTSC_LAST_ARTIFACT_SHIFT - NTSC_ARTIFACT_SHIFT)
+        and    r11, r11, #NTSC_ARTIFACT
+
+        bicne  r9, r9, #NTSC_ARTIFACT
+        orrne  r9, r9, r11
+        str    r9, ntsc_status
+
+        b      done_ntsc_auto
+
+check_dpms:
+        ldr    r8, dpmsframecount
+        tst    r3, #BIT_OSD                  //if osd on then disable grey screen
+        movne  r8, #0
+        ldr    r9, dpms_state
+        cmp    r7, #GREY_DETECTED_LINE_COUNT
+        movlt  r8, #0
+        addge  r8, r8, #1
+        cmp    r8, #DPMS_FRAME_COUNT
+        strle  r8, dpmsframecount
+        movlt  r0, #0
+        movge  r0, #1
+        str    r0, dpms_state
+        cmp    r0, r9
+        blne   DPMS
+
+done_ntsc_auto:
+        ands   r0, r3, #BIT_OSD
+        movne  r0, #1
+        ldr    r9, ntsc_status
+        tst    r9, #NTSC_FFOSD_ENABLE
+        blne   osd_write_palette
+
+        pop    {r1-r12}
+
+        ldr    r8, frame_countdown
+        subs   r8, r8, #1
+        strpl  r8, frame_countdown
+        bpl    skip_sync_time_test
+
+        tst    r3, #BIT_OSD | BIT_CALIBRATE | BIT_PROBE
+        bne    skip_sync_time_test
+
+        ldr    r0, param_timingset
+        orr    r0, #RET_SYNC_TIMING_CHANGED | RET_SYNC_POLARITY_CHANGED
+
+        ldr    r9, param_autoswitch
+        cmp    r9, #AUTOSWITCH_OFF
+        beq    skip_hsync_time_test
+
+        ldr    r8, param_vsync_type
+        cmp    r8, #VSYNC_POLARITY
+        bne    skip_hsync_time_test
+
+        ldr    r8, hsync_measured                //check measured hsync width
+        ldr    r9, hsync_threshold               //if > threshold then hsync likely inverted and active line has been measured
+        rsb    r7, r9, #LINE_TIMEOUT   //r7 is now timeout length minus sync threshold (~100us - 9uS)
+        cmp    r7, r8    //is timeout length -9uS > measured hsync  (i.e. genuine reading, not a timeout)
+        cmpgt  r8, r9   //if yes is measured hsync > 9uS
+        bgt    exit
+
+skip_hsync_time_test:
+        ldr    r8, sync_detected
+        cmp    r8, #0
+        beq    skip_sync_time_test           // if no sync then timing comparison is meaningless
+
+        ldr    r7, hsync_comparison_lo
+        ldr    r8, hsync_comparison_hi
+        cmp    r7, r8
+        beq    skip_sync_time_test            //no sensible window
+
+        ldr    r0, param_timingset
+        orr    r0, #RET_SYNC_TIMING_CHANGED
+
+        ldr    r6, total_hsync_period
+        ldr    r7, hsync_comparison_lo
+        ldr    r8, hsync_comparison_hi
+        cmp    r6, r7
+        blt    exit
+        cmp    r6, r8
+        bgt    exit
+
+        ldr    r6, vsync_period
+        ldr    r7, vsync_comparison_lo
+        ldr    r8, vsync_comparison_hi
+        cmp    r6, r7
+        blt    exit
+        cmp    r6, r8
+        bgt    exit
+
+//        ble    no_test_half
+//        mov    r6, r6, lsr #1                // workaround to check for half the time in case frame dropped due to genlock or palette update taking too long
+//        cmp    r6, r7
+//        blt    exit
+//        cmp    r6, r8
+//        bgt    exit
+//no_test_half:
+
+        ldr    r9, param_autoswitch
+        cmp    r9, #AUTOSWITCH_OFF
+        beq    skip_sync_time_test
+
+        ldr    r8, param_vsync_type
+        cmp    r8, #VSYNC_POLARITY
+        bne    skip_sync_time_test
+
+
+        ldr    r8, param_sync_type
+        tst    r8, #SYNC_BIT_COMPOSITE_SYNC       //set if composite so don't check vsync polarity
+        bne    skip_sync_time_test
+
+        orr    r0, #RET_SYNC_POLARITY_CHANGED
+
+        mov    r8, #VERSION_MASK
+        str    r8, [r4, #-(GPLEV0_OFFSET - GPCLR0_OFFSET)]             //briefly switch to vsync on psync by clearing version bit
+        ldr    r9, [r4]  // dummy read for delay
+        ldr    r9, [r4]  // dummy read for delay
+        ldr    r6, [r4]
+        ldr    r9, [r4]  // dummy read for delay
+        ldr    r7, [r4]
+        str    r8, [r4, #-(GPLEV0_OFFSET - GPSET0_OFFSET)]                //restore version bit
+
+        ldr    r8, param_sync_type
+        tst    r8, #SYNC_BIT_VSYNC_INVERTED
+        eorne  r6, r6, #PSYNC_MASK
+        eorne  r7, r7, #PSYNC_MASK
+        orr    r6, r6, r7            // or together in case of glitches
+        tst    r6, #PSYNC_MASK
+        beq    exit
+
+skip_sync_time_test:
+
+        push   {r1-r5, r11}
+        ldr    r9, =paletteFlags
+        ldr    r8, [r9]
+        bic    r8, r8, #BIT_SET_MODE2_16COLOUR   // mode 2 emulation flag
+        bic    r8, r8, #BIT_MODE2_PALETTE
+        mov    r9, #0           // palette changed flag
+
+        tst    r8, #BIT_IN_BAND_DETECTED
+        beq    noInBandData
+
+        adrl    r10, customPalette
+        ldr    r12, =inBandData
+        ldrb   r11, [r12], #1   //read 1 byte of command data
+        cmp    r11, #0
+        beq    noInBandData
+        cmp    r11, #76        //sanity check on size
+        bgt    noInBandData
+        mov    r11, r11, lsr #1
+        ORR    r8, #BIT_SET_MODE2_16COLOUR          // mode 2 emulation enabled
+        ORR    r8, #BIT_MODE2_PALETTE
+commandloop:
+        ldrb   r1, [r12], #1   //read 1 byte of command data
+        and    r0, r1, #0x0f
+        ldrb   r1, [r12], #1   //read 1 byte of command data
+        and    r3, r1, #0xf0
+        orr    r0, r0, r3, lsl #4
+        and    r3, r1, #0x0f
+        orr    r0, r0, r3, lsl #16
+        orr    r0, r0, r0, lsl #4
+
+        ldr    r2, [r10]
+        str    r0, [r10], #4
+
+        cmp    r0, r2
+        movne  r9, #1
+
+        subs   r11, r11, #1
+        bne    commandloop
+
+noInBandData:
+
+        ldr    r10, =paletteFlags
+        ldr    r7, [r10]
+        str    r8, [r10]
+        cmp    r9, #0
+        cmpeq  r7, r8
+        blne   osd_update_palette
+
+        pop    {r1-r5,r11}
+
+        // Update the OSD in Mode 0..6
+
+        tst    r3, #BIT_CLEAR
+        bne    force_osd_update
+        ldr    r0, param_video_type
+        cmp    r0, #VIDEO_TELETEXT
+        beq    skip_osd_update
+        tst    r3, #BIT_OSD | BIT_SKIP_ALT_FRAME
+        beq    skip_osd_update
+
+        push   {r1-r5, r11}
+        push   {r3}
+        mov    r0, #0 //do not force genlock
+        bl     recalculate_hdmi_clock_line_locked_update
+        pop    {r3}
+        bl     wait_for_vsync               //wait for field sync as sometimes the update will be on the ragged edge of finishing during field sync causing glitches
+        pop    {r1-r5, r11}
+        subs   r6, r6, r7
+        rsbmi  r6, r6, #0
+        ldr    r7, field_type_threshold
+        cmp    r6, r7
+        biclt  r3, r3, #BIT_FIELD_TYPE1  // Odd, clear bit
+        orrge  r3, r3, #BIT_FIELD_TYPE1  // Even, set bit
+force_osd_update:
+        push   {r1-r5, r11}
+        mov    r0, r11
+        mov    r1, r2                       // bytes per line
+        bl     osd_update_fast
+        pop    {r1-r5, r11}
+skip_osd_update:
+        bic    r3, r3, #BIT_CLEAR
+
+#ifdef MULTI_BUFFER
+        // Update the last drawn buffer
+        mov    r0, r3, lsr #OFFSET_CURR_BUFFER
+        and    r0, #3
+        bic    r3, r3, #MASK_LAST_BUFFER
+        orr    r3, r3, r0, lsl #OFFSET_LAST_BUFFER
+        // Flip to it on next V SYNC
+        FLIP_BUFFER
+#endif
+        push   {r1-r5, r11}
+        push   {r3, r4}
+        mov    r0, #0 //do not force genlock
+        bl     recalculate_hdmi_clock_line_locked_update
+        pop    {r3, r4}
+        // Returns:
+        //   r0=0 genlock disabled           - LED off
+        //   r0=1 genlock enabled (unlocked) - LED flash
+        //   r0=2 genlock enabled (locked)   - LED on
+
+        ldr    r2, sync_detected
+        ldr    r11, last_sync_detected
+        orr    r2, r2, r11
+        ldr    r11, last_but_one_sync_detected
+        orr    r2, r2, r11           //sync gone for 3 frames?
+        cmp    r2, #0
+        moveq  r0, #0               //if no sync switch off genlock led
+        moveq  r5, #MODE7_MASK
+        subeq  r11, r4, #(GPLEV0_OFFSET - GPSET0_OFFSET)
+        streq  r5, [r11]             //switch on mode7 led if no sync so at least one led is always lit (will be set correctly when sync reacquired)
+        READ_CYCLE_COUNTER r1
+        mov    r2, #LED1_MASK
+        tst    r0, #1         // should LED flash?
+        tstne  r1, #(1 << 26) // flash rate ~ 8Hz
+        tsteq  r0, #2         // should LED be on?
+        subne  r1, r4, #(GPLEV0_OFFSET - GPSET0_OFFSET)
+        subeq  r1, r4, #(GPLEV0_OFFSET - GPCLR0_OFFSET)
+        str    r2, [r1]
+
+        pop    {r1-r5, r11}
+
+        ldr    r5, osd_timer
+        subs   r5, r5, #1
+        strpl  r5, osd_timer
+
+        // Loop back if required number of fields has not been reached
+        // or if negative (capture forever)
+        ldr    r5, param_ncapture
+        cmp    r5, #0
+        blt    frame
+        subs   r5, #1
+        str    r5, param_ncapture
+        bne    frame
+
+        // Setup the response code
+        ldr    r0, param_timingset
+        orr    r0, #RET_EXPIRED
+
+       // Return
+exit:
+#ifdef MULTI_BUFFER
+        // Save the old buffer state before exiting
+        and    r3, r3, #MASK_LAST_BUFFER
+        str    r3, buffer_state
+        // Return the current buffer state
+        orr    r0, r0, r3
+#endif
+        push   {r0}
+        ldr    r9, ntsc_status
+        tst    r9, #NTSC_ARTIFACT
+        moveq  r0,#0
+        movne  r0,#1
+        bl     set_ntsccolour
+        pop    {r0}
+        pop    {r4 - r12, pc}
+
+
+// ======================================================================
+// Local Variables
+// ======================================================================
+        .align 6
+capture_address:
+        .word 0
+dpmsframecount:
+        .word 0
+dpms_state:
+        .word 0
+flag_state:
+        .word 0
+
+frame_countdown:
+        .word 0
+
+sw1counter:
+        .word 0
+
+sw2counter:
+        .word 0
+
+sw3counter:
+        .word 0
+
+hsync_period:
+        .word 0
+
+total_hsync_period:
+        .word 0
+
+last_hsync_time:
+        .word 0
+
+vsync_line:
+        .word 0
+
+vsync_detected:
+        .word 0
+
+
+
 detectedlinecount:
         .word 0
 
@@ -1234,15 +1446,14 @@ vsync_period:
 vsync_period_1:
         .word 0
 
+vsync_width:
+        .word 0
+
 vsync_comparison_lo:
         .word 0
 
 vsync_comparison_hi:
         .word 0
-
-first_hsync_timestamp:
-        .word 0
-
 
 hsync_comparison_lo:
         .word 0
@@ -1253,13 +1464,14 @@ hsync_comparison_hi:
 hsync_width:
         .word 0
 
-frame_countdown:
-        .word 0
 
 sync_detected:
         .word 1
 
 last_sync_detected:
+        .word 1
+
+last_but_one_sync_detected:
         .word 1
 
 last_scanlines_state:
@@ -1274,13 +1486,12 @@ jitter_offset:
 debug_value:
         .word 0
 
-ntsc_status:
+first_hsync_timestamp:
         .word 0
 
 sw1_power_up:
         .word 0
-flag_state:
-        .word 0
+
 field_type_threshold:
         .word 32000
 elk_lo_field_sync_threshold:
@@ -1293,7 +1504,7 @@ even_threshold:
         .word 54500
 hsync_threshold:
         .word 6144
-other_hsync_threshold:
+normal_hsync_threshold:
         .word 9000
 equalising_threshold:
         .word 3250
@@ -1301,18 +1512,22 @@ frame_minimum:
         .word 10000000
 line_minimum:
         .word 20000
-frame_timeout:
-        .word 24000000
+
 hsync_scroll:
         .word (4000 - 224) | ((4000 + 224) << 16)
 line_timeout:
         .word 100000000
 vsync_retry_count:
         .word 0
-dpmsframecount:
+osd_timer:
         .word 0
-dpms_state:
+hsync_measured:
         .word 0
+
+        .ltorg
+
+frame_timeout:
+        .word 24000000
 
 // ======================================================================
 // WAIT_FOR_VSYNC
@@ -1348,6 +1563,7 @@ wait_for_vsync:
         // r9 = state variable (1 = seen a long pulse
 
         push   {lr}
+        bl     set_hardware_id_r3
         ldr    r10, param_sync_type
         ldr    r9, param_detected_sync_type
         tst    r9, #SYNC_BIT_MIXED_SYNC           //clear if V and H not eored in CPLD
@@ -1402,9 +1618,9 @@ seen_short:
         // No, so look back for the next pulse
         bne    vsync_loop
 
-        ldr    r11, hsync_threshold             // normally 10us
-        mov    r11, r11, lsl #1                 // 20us
-wait_hi_20:                                     // make sure sync high for > 20us to avoid malformed vsync pulses (e.g. Apple II)
+        ldr    r11, hsync_threshold             // normally 9us
+        add    r11, r11, r11, lsr #1            // 13.5us
+wait_hi_20:                                     // make sure sync high for > 13.5us to avoid malformed vsync pulses (e.g. Apple II)
         ldr    r8, [r4]
         tst    r8, #CSYNC_MASK
         beq    vsync_loop
@@ -1426,16 +1642,7 @@ abort_vsync:
         str    r6, last_vsync_time
         subs   r8, r6, r8
         rsbmi  r8, r8, #0
-        ldr    r9, vsync_period_1
-        str    r8, vsync_period_1
-        add    r8, r8, r9
-        mov    r8, r8, lsr #1
-        str    r8, vsync_period
-        pop    {pc}
-
-
-
-
+        b      exit_vsync
 
 
 separate_syncs:
@@ -1489,6 +1696,7 @@ noresetPSA:
         cmp    r8, r7                     // has it been low for ~10us?
         blt    waitPSA
 
+        READ_CYCLE_COUNTER r5             //save start of vsync
 resetPSB:
         READ_CYCLE_COUNTER r9
 waitPSB:
@@ -1532,7 +1740,14 @@ abortvs:
         str    r10, sync_detected
 
         READ_CYCLE_COUNTER r6
+
+        mov    r8, #VERSION_MASK
+        str    r8, [r4, #-(GPLEV0_OFFSET - GPSET0_OFFSET)]                //restore version bit
+        ldr    r7, [r4]  // dummy read for delay
+        ldr    r7, [r4]  // dummy read for delay
+
         mov    r7, r6
+
         WAIT_FOR_CSYNC_1_LONG                   // resync with hsync
 
         ldr    r9, param_video_type
@@ -1547,21 +1762,23 @@ abortvs:
         READ_CYCLE_COUNTER r6
 
 skip_interlace_detect:
+        cmp    r10, #0
+        moveq  r7, r6                           // make all fields look the same
+        moveq  r5, r7                           // set length of vsync pulse to 0 so electron test fails
 
-        mov    r5, r7                           // set length of vsync pulse to 0 so electron test fails
         SWITCH_VSYNC_TO_PSYNC
 
         ldr    r8, last_vsync_time
         str    r7, last_vsync_time
         subs   r8, r7, r8
         rsbmi  r8, r8, #0
+
+exit_vsync:
         ldr    r9, vsync_period_1
         str    r8, vsync_period_1
         add    r8, r8, r9
         mov    r8, r8, lsr #1
         str    r8, vsync_period
-
-
         pop    {pc}
 
 // ======================================================================
@@ -1574,47 +1791,14 @@ skip_interlace_detect:
 measure_n_lines:
         push   {r4-r12, lr}
         mov    r3, #0
+        bl     set_hardware_id_r3
         // Setup R4 as a constant
-        ldr    r4, =GPLEV0
+        bl     _get_GPLEV0_r4
 
         // wait for vsync
         bl     wait_for_vsync
 
-        // skip 20 lines so we are well away from any double vsync pulses
-        add    r1, r0, #20
-        add    r0, r0, #1
-
-        // r1 is the loop counter
-measure_n_loop:
-#if defined(RPI2) || defined(RPI3) || defined(RPI4)
-        mrc    p15, 0, r11, c9, c13, 0
-#else
-        mrc    p15, 0, r11, c15, c12, 1
-#endif
-        WAIT_FOR_CSYNC_1_LONG
-#if defined(RPI2) || defined(RPI3) || defined(RPI4)
-        mrc    p15, 0, r12, c9, c13, 0
-#else
-        mrc    p15, 0, r12, c15, c12, 1
-#endif
-        WAIT_FOR_CSYNC_0_LONG
-        cmp    r1, r0
-#if defined(RPI2) || defined(RPI3) || defined(RPI4)
-        mrceq  p15, 0, r7, c9, c13, 0
-#else
-        mrceq  p15, 0, r7, c15, c12, 1
-#endif
-        subs   r1, r1, #1
-#if defined(RPI2) || defined(RPI3) || defined(RPI4)
-        mrceq  p15, 0, r6, c9, c13, 0
-#else
-        mrceq  p15, 0, r6, c15, c12, 1
-#endif
-        bne    measure_n_loop
-
-        WAIT_FOR_CSYNC_1_LONG
-        WAIT_FOR_CSYNC_0_LONG
-        READ_CYCLE_COUNTER r10
+        bl     do_measure_n_lines
 
         subs   r11, r12, r11
         rsbmi  r11, r11, #0               //r11 now hsync pulse width
@@ -1641,8 +1825,9 @@ measure_vsync:
         push    {r4-r12, lr}
 
         mov    r3, #0
+        bl     set_hardware_id_r3
         // Setup R4 as a constant
-        ldr    r4, =GPLEV0
+        bl     _get_GPLEV0_r4
         mov    r12, #VSYNC_RETRY_MAX          //retry count
         ldr    r9, sync_detected
         cmp    r9, #0
@@ -1669,6 +1854,10 @@ test_again:
 
         // Wait for a second field of frame
         bl     wait_for_vsync_with_line_delay
+
+        subs   r8, r6, r5        // work out length of vsync pulse
+        rsbmi  r8, r0, #0
+        str    r8, vsync_width
 
         // Return the time for a complete frame (should be 40ms)
         subs   r0, r6, r0
@@ -1710,8 +1899,8 @@ test_again:
 // ======================================================================
 analyse_sync:
         push    {r4-r12, lr}
-
-        ldr    r4, =GPLEV0
+        bl     set_hardware_id_r3
+        bl     _get_GPLEV0_r4
         mov    r6, #0 //csync low
         mov    r7, #0 //csync high
         READ_CYCLE_COUNTER r10
@@ -1740,12 +1929,12 @@ analyse_vloop:
         tst    r11, #PSYNC_MASK      //deglitch vsync
         bne    analyse_vloop
         tst    r5, #PSYNC_MASK                     // actually vsync when version = 0
+        ldr    r5, frame_timeout
         addeq  r8, r8, #1
         addne  r9, r9, #1
         READ_CYCLE_COUNTER r11
         subs   r12, r10, r11
         rsbmi  r12, r12, #0
-        ldr    r5, frame_timeout
         cmp    r12, r5
         blt    analyse_vloop
 
@@ -1795,7 +1984,7 @@ clear_screen:
         tst    r9, #0x80
         cmpeq  r10, #0
         moveq  r9, #0
-        andne  r9, r9, #0x7f
+        andne  r9, r9, #0x3f
         cmp    r7, #4
         andeq  r9, #7
         orreq  r9, r9, lsl #4
@@ -1832,6 +2021,7 @@ clearfull:
         str    r7, [r11], #4
         bne    clearfull
         pop    {r4-r12, pc}
+
         .ltorg
 // ======================================================================
 // CLEAR_MENU_BITS
@@ -1929,13 +2119,15 @@ restfull:
         mov    pc, lr   //entry point for capture_line_null cache pre-load
 capture_line_null:
         push    {lr}
-        ldr    r8, =param_fb_bpp
-        ldr    r8, [r8]
         ldr    r12, =param_border
         ldr    r12, [r12]
-
+        cmp    r12, #248
+        bge    do_colour_bars
+        ldr    r8, =param_fb_bpp
+        ldr    r8, [r8]
         cmp    r8, #4
-        movne  r1, r1, lsl #1
+        moveq  r1, r1, lsr #3
+        movne  r1, r1, lsr #2
         andne  r12, r12, #0x7f
         andeq  r12, r12, #7
         orreq  r12, r12, lsl #4
@@ -1950,14 +2142,163 @@ loop_null:
         subs    r1, r1, #1
         bne     loop_null
         pop     {r0, pc}
+do_colour_bars:
+        SKIP_PSYNC
+        ldr    r8, =param_fb_bpp
+        ldr    r8, [r8]
+        cmp    r8, #4
+        moveq  r6, r1, lsr #3+3
+        movne  r6, r1, lsr #2+3
+        cmp    r6, #0
+        moveq  r6, #1
+
+        mov    r12, #7
+        bl     draw_bar
+        mov    r12, #3
+        bl     draw_bar
+        mov    r12, #6
+        bl     draw_bar
+        mov    r12, #2
+        bl     draw_bar
+        mov    r12, #5
+        bl     draw_bar
+        mov    r12, #1
+        bl     draw_bar
+        mov    r12, #4
+        bl     draw_bar
+        mov    r12, #0
+        bl     draw_bar
+        pop     {r0, pc}
+draw_bar:
+        push {r14}
+        cmp    r8, #4
+        orreq  r12, r12, lsl #4
+        orr    r12, r12, lsl #8
+        orr    r12, r12, lsl #16
+        mov    r1, r6
+loop_null_bar:
+        mov    r7, r12
+        mov    r10, r12
+        WRITE_R7_R10
+        subs    r1, r1, #1
+        bne     loop_null_bar
+        pop     {pc}
+
         .ltorg
 
+set_hardware_id_r3:
+        push   {r0, lr}
+        bl     _get_hardware_id
+        cmp    r0, #_RPI2
+        biclt  r3, r3, #BIT_RPI234
+        orrge  r3, r3, #BIT_RPI234
+        pop    {r0, pc}
 
+clear_vsync:
+        push   {lr}
+        // Clear the VSYNC interrupt
+        bl     _get_peripheral_base
+        add    r0, r0, #SMICTRL_OFFSET
+        bic    r3, r3, #BIT_VSYNC_MARKER
+        mov    r10, #0
+        str    r10, [r0]
+        // Don't proceed until this write is complete
+        _DSB
+        pop    {pc}
+
+
+show_vsync:
+        push   {lr}
+        bic    r3, r3, #BIT_VSYNC_MARKER
+        // Poll for the VSYNC interrupt
+        bl     _get_peripheral_base
+        ldr    r14, =INTPEND2_OFFSET
+        add    r0, r0, r14
+        ldr    r0, [r0]
+        tst    r0, #(1<<VSYNCINT)
+        beq    novsync
+        // Clear the VSYNC interrupt
+        bl     clear_vsync
+        // If the vsync indicator is enabled, mark the next line in red
+        tst    r3, #(BIT_VSYNC)
+        orrne  r3, r3, #BIT_VSYNC_MARKER
+        // Remember the line where vsync occurred
+        ldr    r14, =vsync_line
+        str    r5, [r14]
+novsync:
+        pop    {pc}
+
+
+do_measure_n_lines:
+        push   {lr}
+        // skip 20 lines so we are well away from any double vsync pulses
+        add    r1, r0, #20
+        add    r0, r0, #1
+
+        // r1 is the loop counter
+        tst    r3, #BIT_RPI234
+        beq    measure_n_loop_rpi0_1
+measure_n_loop_rpi2_4:
+        mrc    p15, 0, r11, c9, c13, 0
+        WAIT_FOR_CSYNC_1_LONG
+        mrc    p15, 0, r12, c9, c13, 0
+        WAIT_FOR_CSYNC_0_LONG
+        cmp    r1, r0
+        mrceq  p15, 0, r7, c9, c13, 0
+        subs   r1, r1, #1
+        mrceq  p15, 0, r6, c9, c13, 0
+        bne    measure_n_loop_rpi2_4
+        b      done_measure_n_loop_rpi2_4
+measure_n_loop_rpi0_1:
+        mrc    p15, 0, r11, c15, c12, 1
+        WAIT_FOR_CSYNC_1_LONG
+        mrc    p15, 0, r12, c15, c12, 1
+        WAIT_FOR_CSYNC_0_LONG
+        cmp    r1, r0
+        mrceq  p15, 0, r7, c15, c12, 1
+        subs   r1, r1, #1
+        mrceq  p15, 0, r6, c15, c12, 1
+        bne    measure_n_loop_rpi0_1
+done_measure_n_loop_rpi2_4:
+
+        WAIT_FOR_CSYNC_1_LONG
+        WAIT_FOR_CSYNC_0_LONG
+        READ_CYCLE_COUNTER r10
+        pop    {pc}
+
+do_key_press_detect:
+        tst    r8, #SW1_MASK
+        tsteq  r8, #SW3_MASK
+        beq    softreset
+        KEY_PRESS_DETECT SW1_MASK, RET_SW1, sw1counter
+        KEY_PRESS_DETECT SW2_MASK, RET_SW2, sw2counter
+        KEY_PRESS_DETECT SW3_MASK, RET_SW3, sw3counter
+        mov     pc, lr
+
+poll_soft_reset:
+        push   {r0-r12,lr}
+        bl     _get_GPLEV0_r4
+        ldr    r8, [r4]
+        tst    r8, #SW1_MASK
+        tsteq  r8, #SW3_MASK
+        beq    softreset
+        pop    {r0-r12, pc}
+
+softreset:
+        ldr    r8, [r4]
+        //tst    r8, #SW1_MASK
+        //tst    r8, #SW2_MASK
+        tst    r8, #SW3_MASK
+        beq    softreset
+        bl     reboot
+        b      softreset
 // ======================================================================
 // delay_in_arm_cycles()
 // ======================================================================
 
 delay_in_arm_cycles:
+        push   {lr}
+        bl     set_hardware_id_r3
         READ_CYCLE_COUNTER r1
 delay_loop:
         READ_CYCLE_COUNTER r2
@@ -1965,94 +2306,153 @@ delay_loop:
         rsbmi  r2, r2, #0
         cmp    r2, r0
         blt    delay_loop
-        mov    pc, lr
+        pop    {pc}
+
+get_cycle_counter:
+        push   {r3, lr}
+        bl     set_hardware_id_r3
+        READ_CYCLE_COUNTER r0
+        pop    {r3, pc}
+
 
 benchmarkRAM:
         push   {r1-r12, lr}
+        mov    r3, #0
+        bl     set_hardware_id_r3
+        cmp    r0, #1
+        beq    gpu_bench
+        cmp    r0, #2
+        beq    gpu_bench
+        cmp    r0, #3
+        beq    gpio_bench
+        cmp    r0, #4
+        beq    mbox_bench_1
+        cmp    r0, #5
+        beq    mbox_bench_3
         // RAM address in r0 returns with time in r0
+        mov    r1, r0
+        add    r2, r1, #4000
+preload_benchloop2:
+        ldr    r6, [r1], #4
+        cmp    r1, r2
+        blt    preload_benchloop2
         READ_CYCLE_COUNTER r4
-        mov    r3, #1024
+        mov    r7, #100
 benchloop:
         mov    r1, r0
-        add    r2, r1, #1024
+        add    r2, r1, #4000
 benchloop2:
         ldr    r6, [r1], #4
         cmp    r1, r2
         blt    benchloop2
-        subs   r3, r3, #1
+        subs   r7, r7, #1
         bne    benchloop
         READ_CYCLE_COUNTER r5
         subs   r0, r5, r4
         rsbmi  r0, r0, #1
         pop   {r1-r12, pc}
-        .ltorg
 
+gpio_bench:
+        bl     _get_GPLEV0_r4
+        ldr    r1, =100000
+        READ_CYCLE_COUNTER r6
+gpio_bench_loop:
+        ldr    r8, [r4]
+        subs   r1, r1, #1
+        bne    gpio_bench_loop
+        READ_CYCLE_COUNTER r7
+        subs   r0, r7, r6
+        rsbmi  r0, r0, #1
+        pop   {r1-r12, pc}
 
+mbox_bench_1:
+        bl     _get_gpu_data_base_r4
+        ldr    r1, =100000
+        READ_CYCLE_COUNTER r6
+mbox_bench_1_loop:
+        ldr    r8, [r4]
+        subs   r1, r1, #1
+        bne    mbox_bench_1_loop
+        READ_CYCLE_COUNTER r7
+        subs   r0, r7, r6
+        rsbmi  r0, r0, #1
+        pop   {r1-r12, pc}
+
+mbox_bench_3:
+        bl     _get_gpu_data_base_r4
+        ldr    r1, =100000
+        READ_CYCLE_COUNTER r6
+mbox_bench_3_loop:
+        ldr    r11, [r4, #8]
+        ldmia  r4, {r8, r9}   //test ldm on an unaligned register pair
+        subs   r1, r1, #1
+        bne    mbox_bench_3_loop
+        READ_CYCLE_COUNTER r7
+        subs   r0, r7, r6
+        rsbmi  r0, r0, #1
+        pop   {r1-r12, pc}
+
+gpu_bench:
+        READ_CYCLE_COUNTER r6
+        push   {r3, r6}
+        bl     start_vc_bench
+        pop    {r3, r6}
+        READ_CYCLE_COUNTER r7
+        subs   r0, r7, r6
+        rsbmi  r0, r0, #1
+        pop   {r1-r12, pc}
+
+wait_for_source_fieldsync:
+        push {r0-r12, lr}
+        bl     _get_GPLEV0_r4
+        // wait for vsync
+        bl     wait_for_vsync
+        pop  {r0-r12, pc}
         .align 6
+
+key_press_reset:
+        push   {r4-r12, lr}
+        bl     _get_GPLEV0_r4
+        ldr    r8, [r4]
+        mov    r0, #0
+        tst    r8, #SW1_MASK
+        orreq  r0, r0, #1
+        tst    r8, #SW2_MASK
+        orreq  r0, r0, #2
+        tst    r8, #SW3_MASK
+        orreq  r0, r0, #4
+        pop    {r4-r12, lr}
+        mov     pc, lr
+
         .ltorg
 
 #ifdef USE_MULTICORE
-
-read_pointer:
-        .word 0
-write_pointer:
-        .word 0
-r3copy:
-        .word 0
-r4copy:
-        .word 0
-r9copy:
-        .word 0
-capture_count:
-        .word 0
-skip_count:
-        .word 0
+        .align 6
 run_core:
+        mov r0, #1
+        str r0, core_1_available
+        mov r0, #0
+        mov r1, #0
         bl     enable_MMU_and_IDCaches
-        bl    _enable_unaligned_access
+    //    bl    _enable_unaligned_access  //do not use for an armv6 to armv8 compatible binary
         bl    _init_cycle_counter
 run_core_loop:
-        wfe                       // put core to sleep until an event
-        ldr    r11, capture_count
-        cmp    r11, #0
-        beq    run_core_loop      // go back to sleep if capture count not valid
-        ldr    r7, skip_count
-        cmp    r7, #0
-        beq    run_core_loop      // go back to sleep if skip count not valid
-        ldr    r3, r3copy
-        ldr    r4, r4copy
-        ldr    r9, r9copy
-        SKIP_PSYNC
-        mov    r7, #0
-        str    r7, skip_count
-        ldr    r12, write_pointer
-core_capture:
-        WAIT_FOR_PSYNC_EDGE
-        CAPTURE_LOW_BITS
-        WAIT_FOR_PSYNC_EDGE
-        CAPTURE_HIGH_BITS
-        mov    r6, r10
-        WAIT_FOR_PSYNC_EDGE
-        CAPTURE_LOW_BITS
-        WAIT_FOR_PSYNC_EDGE
-        CAPTURE_HIGH_BITS
-        mov    r7, r10
-        WAIT_FOR_PSYNC_EDGE
-        CAPTURE_LOW_BITS
-        WAIT_FOR_PSYNC_EDGE
-        CAPTURE_HIGH_BITS
-        stmia  r12!, {r6,r7,r10}
-        str    r12, write_pointer
-        sub    r11, r11, #3
-        cmp    r11, #0
-        bgt    core_capture
-        str    r12, write_pointer
-        mov    r11, #0
-        str    r11, capture_count
-        b      run_core_loop
+        wfe          // put core to sleep until an event
+        ldr    r0, start_core_1_code
+        cmp    r0, #0
+        beq    run_core_loop
+        mov    r0, #0
+        str    r0, start_core_1_code
+        bl     cga_process_artifact
+        b    run_core_loop
+core_1_available:
+        .word 0
+start_core_1_code:
+        .word 0
 #endif
 
 
+        .ltorg
         .align 6
 customPalette:
         .space 2048, 0
@@ -2099,6 +2499,12 @@ capture_line_normal_1bpp_table:
         .word capture_line_default_onebit_8bpp
         .word capture_line_default_onebit_4bpp
         .word capture_line_default_onebit_8bpp
+        .word capture_line_default_onebit_4bpp
+        .word capture_line_default_onebit_8bpp
+        .word capture_line_default_onebit_4bpp
+        .word capture_line_default_onebit_8bpp
+        .word capture_line_default_onebit_4bpp
+        .word capture_line_default_onebit_8bpp
 
         .word capture_line_default_onebit_double_4bpp
         .word capture_line_default_onebit_double_8bpp
@@ -2110,6 +2516,12 @@ capture_line_normal_1bpp_table:
         .word capture_line_default_onebit_double_8bpp    // placeholder ntsc
         .word capture_line_default_onebit_double_4bpp   // placeholder ntsc
         .word capture_line_default_onebit_double_8bpp    // placeholder ntsc
+        .word capture_line_default_onebit_double_4bpp
+        .word capture_line_default_onebit_double_8bpp
+        .word capture_line_default_onebit_double_4bpp
+        .word capture_line_default_onebit_double_8bpp
+        .word capture_line_default_onebit_double_4bpp
+        .word capture_line_default_onebit_double_8bpp
         .word capture_line_default_onebit_double_4bpp
         .word capture_line_default_onebit_double_8bpp
         .word capture_line_default_onebit_double_4bpp
@@ -2135,6 +2547,12 @@ capture_line_normal_3bpp_table:
         .word capture_line_default_8bpp
         .word capture_line_default_4bpp
         .word capture_line_atari_8bpp
+        .word capture_line_default_4bpp
+        .word capture_line_default_8bpp
+        .word capture_line_default_4bpp
+        .word capture_line_default_8bpp
+        .word capture_line_default_4bpp
+        .word capture_line_default_8bpp
 
         .word capture_line_default_double_4bpp
         .word capture_line_default_double_8bpp
@@ -2150,6 +2568,12 @@ capture_line_normal_3bpp_table:
         .word capture_line_default_double_8bpp
         .word capture_line_default_double_4bpp
         .word capture_line_atari_double_8bpp
+        .word capture_line_default_double_4bpp
+        .word capture_line_default_double_8bpp
+        .word capture_line_default_double_4bpp
+        .word capture_line_default_double_8bpp
+        .word capture_line_default_double_4bpp
+        .word capture_line_default_double_8bpp
 
         .word capture_line_fast_4bpp
         .word capture_line_fast_8bpp
@@ -2159,16 +2583,22 @@ capture_line_normal_6bpp_table:
         .word capture_line_default_sixbits_8bpp
         .word capture_line_default_sixbits_16bpp          // placeholder inband
         .word capture_line_default_sixbits_8bpp           // placeholder inband
-        .word capture_line_default_sixbits_16bpp
+        .word capture_line_ntsc_sixbits_16bpp_cga
         .word capture_line_ntsc_sixbits_8bpp_cga
-        .word capture_line_default_sixbits_16bpp
+        .word capture_line_ntsc_sixbits_16bpp_mono
         .word capture_line_ntsc_sixbits_8bpp_mono
-        .word capture_line_default_sixbits_16bpp
+        .word capture_line_ntsc_sixbits_16bpp_mono_auto
         .word capture_line_ntsc_sixbits_8bpp_mono_auto
         .word capture_line_default_sixbits_16bpp
-        .word capture_line_default_sixbits_8bpp
+        .word capture_line_c64yuv_sixbits_8bpp
         .word capture_line_default_sixbits_16bpp
         .word capture_line_atari_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_c64lc_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_atarilc_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_atarilc2600_sixbits_8bpp
 
         .word capture_line_default_sixbits_double_16bpp
         .word capture_line_default_sixbits_double_8bpp
@@ -2180,13 +2610,66 @@ capture_line_normal_6bpp_table:
         .word capture_line_ntsc_sixbits_double_8bpp_mono         // for tandy coco 1 & 2
         .word capture_line_default_sixbits_double_16bpp          // placeholder ntsc
         .word capture_line_ntsc_sixbits_double_8bpp_mono_auto    // for tandy coco 1 & 2 auto switches if UV = no colour
-        .word capture_line_default_sixbits_double_16bpp
-        .word capture_line_default_sixbits_double_8bpp
+        .word capture_line_c64yuv_sixbits_double_16bpp
+        .word capture_line_c64yuv_sixbits_double_8bpp
         .word capture_line_default_sixbits_double_16bpp
         .word capture_line_atari_sixbits_double_8bpp
+        .word capture_line_c64lc_sixbits_double_16bpp
+        .word capture_line_c64lc_sixbits_double_8bpp
+        .word capture_line_atarilc_sixbits_double_16bpp
+        .word capture_line_atarilc_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_atarilc2600_sixbits_double_8bpp
 
         .word capture_line_fast_sixbits_16bpp
         .word capture_line_fast_sixbits_8bpp
+
+
+capture_line_normal_odd_even_6bpp_table:
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_odd_even_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp          // placeholder inband
+        .word capture_line_default_odd_even_sixbits_8bpp           // placeholder inband
+        .word capture_line_ntsc_sixbits_16bpp_cga
+        .word capture_line_ntsc_sixbits_8bpp_cga
+        .word capture_line_ntsc_sixbits_16bpp_mono
+        .word capture_line_ntsc_sixbits_8bpp_mono
+        .word capture_line_ntsc_sixbits_16bpp_mono_auto
+        .word capture_line_ntsc_sixbits_8bpp_mono_auto
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_c64yuv_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_atari_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_c64lc_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_atarilc_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_atarilc2600_sixbits_8bpp
+
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_odd_even_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp          // placeholder inband
+        .word capture_line_default_odd_even_sixbits_double_8bpp           // placeholder inband
+        .word capture_line_default_sixbits_double_16bpp          // placeholder ntsc
+        .word capture_line_ntsc_sixbits_double_8bpp_mono         // placeholder ntsc
+        .word capture_line_default_sixbits_double_16bpp          // placeholder ntsc
+        .word capture_line_ntsc_sixbits_double_8bpp_mono         // for tandy coco 1 & 2
+        .word capture_line_default_sixbits_double_16bpp          // placeholder ntsc
+        .word capture_line_ntsc_sixbits_double_8bpp_mono_auto    // for tandy coco 1 & 2 auto switches if UV = no colour
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_c64yuv_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_atari_sixbits_double_8bpp
+        .word capture_line_c64lc_sixbits_double_16bpp
+        .word capture_line_c64lc_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_atarilc_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_atarilc2600_sixbits_double_8bpp
+
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_odd_even_sixbits_double_8bpp
 
 capture_line_normal_9bpplo_table:
         .word capture_line_default_ninebitslo_16bpp
@@ -2203,7 +2686,19 @@ capture_line_normal_9bpplo_table:
         .word capture_line_default_eightbits_8bpp
         .word capture_line_default_ninebitslo_16bpp
         .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
 
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
         .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
         .word capture_line_default_ninebitslo_double_16bpp
@@ -2222,7 +2717,6 @@ capture_line_normal_9bpplo_table:
         .word capture_line_fast_ninebitslo_16bpp
         .word capture_line_fast_eightbits_8bpp
 
-
 capture_line_normal_9bpphi_table:
         .word capture_line_default_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
@@ -2238,7 +2732,19 @@ capture_line_normal_9bpphi_table:
         .word capture_line_default_eightbits_8bpp
         .word capture_line_default_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_ninebitshi_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_ninebitshi_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_ninebitshi_16bpp
+        .word capture_line_default_eightbits_8bpp
 
+        .word capture_line_default_ninebitshi_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitshi_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitshi_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
         .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
         .word capture_line_default_ninebitshi_double_16bpp
@@ -2272,7 +2778,19 @@ capture_line_normal_12bpp_table:
         .word capture_line_default_eightbits_8bpp
         .word capture_line_default_twelvebits_16bpp
         .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_twelvebits_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_twelvebits_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_twelvebits_16bpp
+        .word capture_line_default_eightbits_8bpp
 
+        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
         .word capture_line_default_twelvebits_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
         .word capture_line_default_twelvebits_double_16bpp
@@ -2291,123 +2809,213 @@ capture_line_normal_12bpp_table:
         .word capture_line_fast_twelvebits_16bpp
         .word capture_line_fast_eightbits_8bpp
 
-capture_line_simple_12bpp_trailing_pos_table:
-        .word capture_line_default_simple_trailing_pos_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_pos_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_pos_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_pos_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_pos_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_pos_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_pos_16bpp
-        .word capture_line_default_eightbits_8bpp
+
+capture_line_simple_6bpp_table:
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp          // placeholder inband
+        .word capture_line_default_simple_sixbits_8bpp         // placeholder inband
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+        .word capture_line_default_sixbits_16bpp
+        .word capture_line_default_simple_sixbits_8bpp
+
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp          // placeholder inband
+        .word capture_line_default_sixbits_double_8bpp           // placeholder inband
+        .word capture_line_default_sixbits_double_16bpp          // placeholder ntsc
+        .word capture_line_default_sixbits_double_8bpp         // placeholder ntsc
+        .word capture_line_default_sixbits_double_16bpp          // placeholder ntsc
+        .word capture_line_default_sixbits_double_8bpp         // for tandy coco 1 & 2
+        .word capture_line_default_sixbits_double_16bpp          // placeholder ntsc
+        .word capture_line_default_sixbits_double_8bpp    // for tandy coco 1 & 2 auto switches if UV = no colour
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_sixbits_double_8bpp
+        .word capture_line_default_sixbits_double_16bpp
+        .word capture_line_default_sixbits_double_8bpp
+
+        .word capture_line_fast_sixbits_16bpp
+        .word capture_line_fast_simple_sixbits_8bpp
 
 
-        .word capture_line_default_twelvebits_double_16bpp
+capture_line_simple_9bpplo_table:
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp
+        .word capture_line_default_eightbits_8bpp
+
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
 
-        .word capture_line_fast_simple_trailing_pos_16bpp
+        .word capture_line_fast_simple_ninebitslo_16bpp
         .word capture_line_fast_eightbits_8bpp
 
-capture_line_simple_12bpp_leading_pos_table:
-        .word capture_line_default_simple_leading_pos_16bpp
+capture_line_simple_9bpplo_blank_table:
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_pos_16bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_pos_16bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_pos_16bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_pos_16bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_pos_16bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_pos_16bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitslo_16bpp_blank
         .word capture_line_default_eightbits_8bpp
 
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitslo_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
 
-        .word capture_line_fast_simple_leading_pos_16bpp
+        .word capture_line_fast_simple_ninebitslo_16bpp_blank
         .word capture_line_fast_eightbits_8bpp
 
-capture_line_simple_12bpp_trailing_neg_table:
-        .word capture_line_default_simple_trailing_neg_16bpp
+capture_line_simple_9bpphi_table:
+        .word capture_line_default_simple_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_neg_16bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_neg_16bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_neg_16bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_neg_16bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_neg_16bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_neg_16bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_ninebitshi_16bpp
         .word capture_line_default_eightbits_8bpp
 
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_ninebitshi_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitshi_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitshi_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_ninebitshi_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
 
-        .word capture_line_fast_simple_trailing_neg_16bpp
+        .word capture_line_fast_simple_ninebitshi_16bpp
         .word capture_line_fast_eightbits_8bpp
 
-capture_line_simple_12bpp_leading_neg_table:
-        .word capture_line_default_simple_leading_neg_16bpp
+
+capture_line_simple_12bpp_table:
+        .word capture_line_default_simple_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_neg_16bpp
+        .word capture_line_default_simple_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_neg_16bpp
+        .word capture_line_default_simple_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_neg_16bpp
+        .word capture_line_default_simple_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_neg_16bpp
+        .word capture_line_default_simple_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_neg_16bpp
+        .word capture_line_default_simple_16bpp
         .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_neg_16bpp
+        .word capture_line_default_simple_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_16bpp
+        .word capture_line_default_eightbits_8bpp
+        .word capture_line_default_simple_16bpp
         .word capture_line_default_eightbits_8bpp
 
         .word capture_line_default_twelvebits_double_16bpp
@@ -2424,77 +3032,16 @@ capture_line_simple_12bpp_leading_neg_table:
         .word capture_line_default_eightbits_double_8bpp
         .word capture_line_default_twelvebits_double_16bpp
         .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
+        .word capture_line_default_twelvebits_double_16bpp
+        .word capture_line_default_eightbits_double_8bpp
 
-        .word capture_line_fast_simple_leading_neg_16bpp
+        .word capture_line_fast_simple_16bpp
         .word capture_line_fast_eightbits_8bpp
 
-capture_line_simple_12bpp_trailing_both_table:
-        .word capture_line_default_simple_trailing_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_trailing_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-
-        .word capture_line_fast_simple_trailing_both_16bpp
-        .word capture_line_fast_eightbits_8bpp
-
-capture_line_simple_12bpp_leading_both_table:
-        .word capture_line_default_simple_leading_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-        .word capture_line_default_simple_leading_both_16bpp
-        .word capture_line_default_eightbits_8bpp
-
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-        .word capture_line_default_twelvebits_double_16bpp
-        .word capture_line_default_eightbits_double_8bpp
-
-        .word capture_line_fast_simple_leading_both_16bpp
-        .word capture_line_fast_eightbits_8bpp
 
 // tables below are deprecated and will be removed in future
 
@@ -2514,7 +3061,19 @@ capture_line_odd_6bpp_table:  //no six bit versions
         .word capture_line_odd_8bpp
         .word capture_line_odd_4bpp
         .word capture_line_odd_8bpp
+        .word capture_line_odd_4bpp
+        .word capture_line_odd_8bpp
+        .word capture_line_odd_4bpp
+        .word capture_line_odd_8bpp
+        .word capture_line_odd_4bpp
+        .word capture_line_odd_8bpp
 
+        .word capture_line_odd_4bpp
+        .word capture_line_odd_8bpp
+        .word capture_line_odd_4bpp
+        .word capture_line_odd_8bpp
+        .word capture_line_odd_4bpp
+        .word capture_line_odd_8bpp
         .word capture_line_odd_4bpp
         .word capture_line_odd_8bpp
         .word capture_line_odd_4bpp
@@ -2550,7 +3109,19 @@ capture_line_even_6bpp_table: //no six bit versions
         .word capture_line_even_8bpp
         .word capture_line_even_4bpp
         .word capture_line_even_8bpp
+        .word capture_line_even_4bpp
+        .word capture_line_even_8bpp
+        .word capture_line_even_4bpp
+        .word capture_line_even_8bpp
+        .word capture_line_even_4bpp
+        .word capture_line_even_8bpp
 
+        .word capture_line_even_4bpp
+        .word capture_line_even_8bpp
+        .word capture_line_even_4bpp
+        .word capture_line_even_8bpp
+        .word capture_line_even_4bpp
+        .word capture_line_even_8bpp
         .word capture_line_even_4bpp
         .word capture_line_even_8bpp
         .word capture_line_even_4bpp
@@ -2584,7 +3155,19 @@ capture_line_half_odd_3bpp_table:
         .word capture_line_half_odd_8bpp
         .word capture_line_half_odd_4bpp
         .word capture_line_half_odd_8bpp
+        .word capture_line_half_odd_4bpp
+        .word capture_line_half_odd_8bpp
+        .word capture_line_half_odd_4bpp
+        .word capture_line_half_odd_8bpp
+        .word capture_line_half_odd_4bpp
+        .word capture_line_half_odd_8bpp
 
+        .word capture_line_half_odd_4bpp
+        .word capture_line_half_odd_8bpp
+        .word capture_line_half_odd_4bpp
+        .word capture_line_half_odd_8bpp
+        .word capture_line_half_odd_4bpp
+        .word capture_line_half_odd_8bpp
         .word capture_line_half_odd_4bpp
         .word capture_line_half_odd_8bpp
         .word capture_line_half_odd_4bpp
@@ -2618,7 +3201,19 @@ capture_line_half_even_3bpp_table:
         .word capture_line_half_even_8bpp
         .word capture_line_half_even_4bpp
         .word capture_line_half_even_8bpp
+        .word capture_line_half_even_4bpp
+        .word capture_line_half_even_8bpp
+        .word capture_line_half_even_4bpp
+        .word capture_line_half_even_8bpp
+        .word capture_line_half_even_4bpp
+        .word capture_line_half_even_8bpp
 
+        .word capture_line_half_even_4bpp
+        .word capture_line_half_even_8bpp
+        .word capture_line_half_even_4bpp
+        .word capture_line_half_even_8bpp
+        .word capture_line_half_even_4bpp
+        .word capture_line_half_even_8bpp
         .word capture_line_half_even_4bpp
         .word capture_line_half_even_8bpp
         .word capture_line_half_even_4bpp
@@ -2884,8 +3479,9 @@ scan_for_single_pixels_12bpp:
         mov    r2, #0
         mov    r3, #0xff
         orr    r3, r3, #0xff00
-        ldr    r12, [r0]
-        and    r12, r12, r3         //first pixel used as background colour reference
+        //ldr    r12, [r0]
+        //and    r12, r12, r3         //first pixel used as background colour reference
+        mov    r12, #0x7000           //black with alpha = 7 (i.e. dimmed)
         mov    r4, #0  //pixel 6
         mov    r5, #0  //pixel 7
         mov    r6, #0  //pixel 8
@@ -2970,15 +3566,17 @@ diff_loop:
 
 wait_for_pi_fieldsync:
         push   {r4-r12, lr}
-        CLEAR_VSYNC
+        bl     clear_vsync
         // Poll for the VSYNC interrupt
-        ldr    r0, =INTPEND2
+        bl     _get_peripheral_base
+        ldr    r14, =INTPEND2_OFFSET
+        add    r0, r0, r14
 wait_for_pi_loop:
         ldr    r1, [r0]
         tst    r1, #(1<<VSYNCINT)
         beq    wait_for_pi_loop
         // Clear the VSYNC interrupt
-        CLEAR_VSYNC
+        bl     clear_vsync
         pop    {r4-r12, pc}
 
 // ======================================================================
@@ -2991,8 +3589,11 @@ poll_keys_loop:
         // Wait ~20ms (for debouncing)
         ldr    r0, =20*1024*1024
         bl     delay_in_arm_cycles
-        ldr    r4, =GPLEV0
+        bl     _get_GPLEV0_r4
         ldr    r8, [r4]
+        tst    r8, #SW1_MASK
+        tsteq  r8, #SW3_MASK
+        beq    softreset
         mov    r0, #0
         ldr    r10, =sw1_power_up
         ldr    r9, [r10]
@@ -3020,9 +3621,14 @@ poll_keys_exit:
         mov    pc, lr
 
         .ltorg
+
+        .align 6
+palette_data_16:
+        .space (256*4), 0
+
         .align 6
 line_buffer:
-        .space 1920, 0
+        .space 4096, 0
         .align 6
 dummyscreen:               // used by capture preload
         .space 1920*1080, 0

@@ -8,12 +8,15 @@
 
 #define ATTR_DOUBLE_SIZE (1 << 0)
 
-#define MAX_PALETTE_ENTRIES 256
+#define MAX_PALETTE_ENTRIES 257
 
 extern int clock_error_ppm;
 extern int customPalette[];
 extern char paletteHighNibble[];
 extern int paletteFlags;
+extern int palette_data_16[];
+extern int c64_artifact_palette_16[];
+extern char c64_YUV_palette_lookup[];
 
 enum {
    HDMI_EXACT,
@@ -32,31 +35,40 @@ enum {
    PALETTE_XRGB,
    PALETTE_LASER,
    PALETTE_RGBISPECTRUM,
+   PALETTE_RGBISPECTRUMLUMACODE,
    PALETTE_SPECTRUM,
    PALETTE_AMSTRAD,
    PALETTE_RrGgBb,
    PALETTE_RrGgBbI,
    PALETTE_MDA,
-   PALETTE_ATOM_MKI,
-   PALETTE_ATOM_MKI_FULL,
+   PALETTE_DRAGON_COCO,
+   PALETTE_DRAGON_COCO_FULL,
    PALETTE_ATOM_6847_EMULATORS,
    PALETTE_ATOM_MKII,
    PALETTE_ATOM_MKII_PLUS,
    PALETTE_ATOM_MKII_FULL,
    PALETTE_MONO2,
    PALETTE_MONO3,
+   PALETTE_MONO3_BRIGHT,
    PALETTE_MONO4,
    PALETTE_MONO6,
+   PALETTE_MONO8_RGB,
+   PALETTE_MONO8_YUV,
    PALETTE_TI,
+   PALETTE_TILUMACODE,
    PALETTE_SPECTRUM48K,
    PALETTE_CGS24,
    PALETTE_CGS25,
    PALETTE_CGN25,
-   PALETTE_C64,
-   PALETTE_C64_REV1,
+   PALETTE_COMMODORE64,
+   PALETTE_COMMODORE64_REV1,
+   PALETTE_VIC20,
    PALETTE_ATARI800_PAL,
    PALETTE_ATARI800_NTSC,
+   PALETTE_ATARI2600_PAL,
+   PALETTE_ATARI2600_NTSC,
    PALETTE_TEA1002,
+   PALETTE_INTELLIVISION,
    PALETTE_YG_4,
    PALETTE_UB_4,
    PALETTE_VR_4,
@@ -131,13 +143,6 @@ enum {
 };
 
 enum {
-   AUTOSWITCH_OFF,
-   AUTOSWITCH_PC,
-   AUTOSWITCH_MODE7,
-   NUM_AUTOSWITCHES
-};
-
-enum {
    FRONTEND_TTL_3BIT,
    FRONTEND_SIMPLE,
    FRONTEND_ATOM,
@@ -157,22 +162,24 @@ enum {
 };
 
 enum {
-   VLOCKSPEED_SLOW,
-   VLOCKSPEED_MEDIUM,
-   VLOCKSPEED_FAST,
-   NUM_VLOCKSPEED
+   GENLOCK_SPEED_SLOW,
+   GENLOCK_SPEED_MEDIUM,
+   GENLOCK_SPEED_FAST,
+   NUM_GENLOCK_SPEED
 };
 
 enum {
-   VLOCKADJ_NARROW,
-   VLOCKADJ_165MHZ,
-   NUM_VLOCKADJ
+   GENLOCK_ADJUST_FULL,
+   GENLOCK_ADJUST_LIMIT,
+   GENLOCK_ADJUST_50_60_5,
+   GENLOCK_ADJUST_50_60_2,
+   GENLOCK_ADJUST_50_60_1,
+   NUM_GENLOCK_ADJUST
 };
 
 enum {
    FONTSIZE_8X8,
-   FONTSIZE_12X20_4,
-   FONTSIZE_12X20_8,
+   FONTSIZE_12X20,
    NUM_FONTSIZE
 };
 
@@ -217,16 +224,106 @@ enum {
     NUM_FRINGE
 };
 
+enum {
+    NTSCTYPE_NEW_CGA,
+    NTSCTYPE_OLD_CGA,
+    NTSCTYPE_APPLE,
+    NTSCTYPE_SIMPLE,
+    NUM_NTSCTYPE
+};
+
+enum {
+    PAL_ODD_NORMAL,
+    PAL_ODD_BLENDED,
+    PAL_ODD_ALL,
+    NUM_PAL_ODD
+};
+
+enum {
+   F_AUTO_SWITCH,
+   F_RESOLUTION,
+   F_REFRESH,
+   F_HDMI_AUTO,
+   F_HDMI_MODE,
+   F_HDMI_MODE_STANDBY,
+   F_SCALING,
+   F_PROFILE,
+   F_SAVED_CONFIG,
+   F_SUB_PROFILE,
+   F_PALETTE,
+   F_PALETTE_CONTROL,
+   F_NTSC_COLOUR,
+   F_NTSC_PHASE,
+   F_NTSC_TYPE,
+   F_NTSC_QUALITY,
+   F_PAL_ODD_LEVEL,
+   F_PAL_ODD_LINE,
+   F_TINT,
+   F_SAT,
+   F_CONT,
+   F_BRIGHT,
+   F_GAMMA,
+   F_TIMING_SET,
+   F_MODE7_DEINTERLACE,
+   F_NORMAL_DEINTERLACE,
+   F_MODE7_SCALING,
+   F_NORMAL_SCALING,
+   F_DROP_FRAME,
+   F_FFOSD,
+   F_SWAP_ASPECT,
+   F_OUTPUT_COLOUR,
+   F_OUTPUT_INVERT,
+   F_SCANLINES,
+   F_SCANLINE_LEVEL,
+   F_CROP_BORDER,
+   F_SCREENCAP_SIZE,
+   F_FONT_SIZE,
+   F_BORDER_COLOUR,
+   F_VSYNC_INDICATOR,
+   F_GENLOCK_MODE,
+   F_GENLOCK_LINE,
+   F_GENLOCK_SPEED,
+   F_GENLOCK_ADJUST,
+#ifdef MULTI_BUFFER
+   F_NUM_BUFFERS,
+#endif
+   F_RETURN_POSITION,
+   F_DEBUG,
+   F_BUTTON_REVERSE,
+   F_OVERCLOCK_CPU,
+   F_OVERCLOCK_CORE,
+   F_OVERCLOCK_SDRAM,
+   F_POWERUP_MESSAGE,
+   F_YUV_PIXEL_DOUBLE,
+   F_INTEGER_ASPECT,
+
+   F_PROFILE_NUM,
+   F_H_WIDTH,
+   F_V_HEIGHT,
+   F_CLOCK,
+   F_LINE_LEN,
+   F_H_OFFSET,
+   F_V_OFFSET,
+
+   F_FRONTEND,       //must be last
+
+   MAX_PARAMETERS
+
+};
+
+
 void osd_init();
 void osd_clear();
+void osd_write_palette(int new_active);
 void osd_set(int line, int attr, char *text);
 void osd_set_noupdate(int line, int attr, char *text);
 void osd_set_clear(int line, int attr, char *text);
 void osd_show_cpld_recovery_menu(int update);
 void osd_refresh();
-void osd_update(uint32_t *osd_base, int bytes_per_line);
+void osd_update(uint32_t *osd_base, int bytes_per_line, int relocate);
 void osd_update_fast(uint32_t *osd_base, int bytes_per_line);
 void osd_display_interface(int line);
+int lumacode_multiplier();
 int  osd_active();
 int menu_active();
 int  osd_key(int key);
@@ -238,7 +335,9 @@ void process_single_profile(char *buffer);
 uint32_t osd_get_palette(int index);
 int autoswitch_detect(int one_line_time_ns, int lines_per_frame, int sync_type);
 int sub_profiles_available();
-uint32_t osd_get_equivalence(uint32_t value);
+//uint32_t osd_get_equivalence(uint32_t value);
 int get_existing_frontend(int frontend);
 void set_auto_name(char* name);
+int normalised_gamma_correct(int old_value);
+int get_inhibit_palette_dimming16();
 #endif

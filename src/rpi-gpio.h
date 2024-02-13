@@ -1,4 +1,4 @@
-/*
+﻿/*
     Part of the Raspberry-Pi Bare Metal Tutorials
     Copyright (c) 2013-2015, Brian Sidebotham
     All rights reserved.
@@ -30,13 +30,16 @@
 #define RPI_GPIO_H
 
 #include "rpi-base.h"
+#include "startup.h"
+
 
 /** The base address of the GPIO peripheral (ARM Physical Address) */
-#define RPI_GPIO_BASE       (PERIPHERAL_BASE + 0x200000UL)
+#define RPI_GPIO_BASE       (_get_peripheral_base() + 0x200000UL)
 
 // Raspberry Pi3 has a differentway of controlling the LED
 
-#if defined(RPIZERO) || defined(RPIBPLUS) || defined(RPI2) || defined(RPI3)|| defined(RPI4)
+//#if defined(RPIZERO) || defined(RPIBPLUS) || defined(RPI2) || defined(RPI3)|| defined(RPI4)
+
     #define LED_GPFSEL      GPFSEL[4]
     #define LED_GPFBIT      21
     #define LED_GPSET       GPSET1
@@ -44,15 +47,16 @@
     #define LED_GPIO_BIT    15
     #define LED_ON()        do { RPI_GpioBase->LED_GPCLR = (1 << LED_GPIO_BIT); } while(0)
     #define LED_OFF()       do { RPI_GpioBase->LED_GPSET = (1 << LED_GPIO_BIT); } while(0)
-#else
-    #define LED_GPFSEL      GPFSEL[1]
-    #define LED_GPFBIT      18
-    #define LED_GPSET       GPSET0
-    #define LED_GPCLR       GPCLR0
-    #define LED_GPIO_BIT    16
-    #define LED_ON()        do { RPI_GpioBase->LED_GPSET = (1 << LED_GPIO_BIT); } while(0)
-    #define LED_OFF()       do { RPI_GpioBase->LED_GPCLR = (1 << LED_GPIO_BIT); } while(0)
-#endif
+
+//#else
+//    #define LED_GPFSEL      GPFSEL[1]
+//    #define LED_GPFBIT      18
+//    #define LED_GPSET       GPSET0
+//    #define LED_GPCLR       GPCLR0
+//    #define LED_GPIO_BIT    16
+//    #define LED_ON()        do { RPI_GpioBase->LED_GPSET = (1 << LED_GPIO_BIT); } while(0)
+//    #define LED_OFF()       do { RPI_GpioBase->LED_GPCLR = (1 << LED_GPIO_BIT); } while(0)
+//#endif
 
 typedef enum
 {
@@ -155,36 +159,36 @@ typedef struct
     rpi_reg_wo_t    GPCLR0;
     rpi_reg_wo_t    GPCLR1;
     rpi_reg_ro_t    Reserved2;
-    rpi_reg_wo_t    GPLEV0;
-    rpi_reg_wo_t    GPLEV1;
+    rpi_reg_ro_t    GPLEV0;
+    rpi_reg_ro_t    GPLEV1;
     rpi_reg_ro_t    Reserved3;
-    rpi_reg_wo_t    GPEDS0;
-    rpi_reg_wo_t    GPEDS1;
+    rpi_reg_rw_t    GPEDS0;
+    rpi_reg_rw_t    GPEDS1;
     rpi_reg_ro_t    Reserved4;
-    rpi_reg_wo_t    GPREN0;
-    rpi_reg_wo_t    GPREN1;
+    rpi_reg_rw_t    GPREN0;
+    rpi_reg_rw_t    GPREN1;
     rpi_reg_ro_t    Reserved5;
-    rpi_reg_wo_t    GPFEN0;
-    rpi_reg_wo_t    GPFEN1;
+    rpi_reg_rw_t    GPFEN0;
+    rpi_reg_rw_t    GPFEN1;
     rpi_reg_ro_t    Reserved6;
-    rpi_reg_wo_t    GPHEN0;
-    rpi_reg_wo_t    GPHEN1;
+    rpi_reg_rw_t    GPHEN0;
+    rpi_reg_rw_t    GPHEN1;
     rpi_reg_ro_t    Reserved7;
-    rpi_reg_wo_t    GPLEN0;
-    rpi_reg_wo_t    GPLEN1;
+    rpi_reg_rw_t    GPLEN0;
+    rpi_reg_rw_t    GPLEN1;
     rpi_reg_ro_t    Reserved8;
-    rpi_reg_wo_t    GPAREN0;
-    rpi_reg_wo_t    GPAREN1;
+    rpi_reg_rw_t    GPAREN0;
+    rpi_reg_rw_t    GPAREN1;
     rpi_reg_ro_t    Reserved9;
-    rpi_reg_wo_t    GPAFEN0;
-    rpi_reg_wo_t    GPAFEN1;
-    rpi_reg_ro_t    Reserved10;
-    rpi_reg_wo_t    GPPUD;
-    rpi_reg_wo_t    GPPUDCLK0;
-    rpi_reg_wo_t    GPPUDCLK1;
-    rpi_reg_ro_t    Reserved11;
+    rpi_reg_rw_t    GPAFEN0;
+    rpi_reg_rw_t    GPAFEN1;    //0x8C
+    rpi_reg_ro_t    Reserved10; //0x90
+    rpi_reg_rw_t    GPPUD;      // 0x94
+    rpi_reg_rw_t    GPPUDCLK0;  // 0x98
+    rpi_reg_rw_t    GPPUDCLK1;  // 0x9c
+    rpi_reg_ro_t    Reserved11[0x11];
+    rpi_reg_rw_t    GPPULL[4]; // 0xe4 Pi4 only
 } rpi_gpio_t;
-
 typedef enum
 {
     RPI_IO_LO = 0,

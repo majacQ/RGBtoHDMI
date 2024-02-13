@@ -6,7 +6,11 @@
 .text
 
 .global capture_line_default_sixbits_8bpp
+.global capture_line_default_odd_even_sixbits_8bpp
 .global capture_line_default_sixbits_16bpp
+
+.extern palette_data_16
+.extern debug_value
 
 // The capture line function is provided the following:
 //   r0 = pointer to current line in frame buffer
@@ -28,6 +32,7 @@ capture_line_default_sixbits_4bpp:
         push    {lr}
         SETUP_VSYNC_DEBUG_R11
         SKIP_PSYNC_NO_OLD_CPLD
+        mov    r1, r1, lsr #2
 loop:
         WAIT_FOR_PSYNC_EDGE_FAST         // expects GPLEV0 in r4, result in r8
         CAPTURE_0_BITS_WIDE r11          // input in r8
@@ -73,6 +78,7 @@ capture_line_default_sixbits_8bpp:
         push    {lr}
         SETUP_VSYNC_DEBUG_R11_R12
         SKIP_PSYNC_NO_OLD_CPLD
+        mov    r1, r1, lsr #2
 loop_8bpp:
         WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
         CAPTURE_LOW_BITS_8BPP_WIDE r11                // input in r8
@@ -108,8 +114,60 @@ preload_capture_line_default_sixbits_8bpp:
         SETUP_DUMMY_PARAMETERS
         b       capture_line_default_sixbits_8bpp
 
+        .ltorg
+
+
+
+        // *** 8 bit ***
+        .align 6
+        b       preload_capture_line_default_odd_even_sixbits_8bpp
+capture_line_default_odd_even_sixbits_8bpp:
+        push    {lr}
+        SETUP_VSYNC_DEBUG_R11_R12
+        SKIP_PSYNC_NO_OLD_CPLD
+        mov    r1, r1, lsr #2
+loop_oe8bpp:
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_LOW_BITS_ODD_EVEN_8BPP_WIDE r11                // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_HIGH_BITS_ODD_EVEN_8BPP_WIDE r5                // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_LOW_BITS_ODD_EVEN_8BPP_WIDE r12                // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_HIGH_BITS_ODD_EVEN_8BPP_WIDE r6                // input in r8
+
+        WRITE_R5_R6_IF_LAST
+        cmp     r1, #1
+        popeq   {r0, pc}
+
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_LOW_BITS_ODD_EVEN_8BPP_WIDE r11                // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_HIGH_BITS_ODD_EVEN_8BPP_WIDE r7                // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_LOW_BITS_ODD_EVEN_8BPP_WIDE r12                // input in r8
+        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
+        CAPTURE_HIGH_BITS_ODD_EVEN_8BPP_WIDE r10               // input in r8
+
+        WRITE_R5_R6_R7_R10
+
+        subs    r1, r1, #2
+        bne     loop_oe8bpp
+
+        pop     {r0, pc}
+
+
+preload_capture_line_default_odd_even_sixbits_8bpp:
+        SETUP_DUMMY_PARAMETERS
+        b       capture_line_default_odd_even_sixbits_8bpp
 
         .ltorg
+
+
+
+
+
+
 
         // *** 16 bit ***
         .align 6
@@ -118,37 +176,33 @@ capture_line_default_sixbits_16bpp:
         push    {lr}
         SETUP_VSYNC_DEBUG_16BPP_R11
         SKIP_PSYNC_NO_OLD_CPLD
-        SETUP_TWELVE_BITS_MASK_R14
+        mov    r1, r1, lsr #2
+        ldr    r14, =palette_data_16
 loop_16bpp:
         WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11              // input in r8
+        CAPTURE_SIX_BITS_16BPP r11 r5                 // input in r8
         WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r5               // input in r8
+        CAPTURE_SIX_BITS_16BPP r11 r6                 // input in r8
         WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11              // input in r8
+        CAPTURE_SIX_BITS_16BPP r11 r7                 // input in r8
         WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r6               // input in r8
-
-        WRITE_R5_R6_IF_LAST_16BPP
-        cmp     r1, #1
-        popeq   {r0, pc}
-
-        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11              // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r7               // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_LO r11              // input in r8
-        WAIT_FOR_PSYNC_EDGE_FAST                      // expects GPLEV0 in r4, result in r8
-        CAPTURE_TWELVE_BITS_16BPP_HI r10              // input in r8
+        CAPTURE_SIX_BITS_16BPP r11 r10                // input in r8
 
         WRITE_R5_R6_R7_R10_16BPP
 
-        subs    r1, r1, #2
+        subs    r1, r1, #1
         bne     loop_16bpp
 
         pop     {r0, pc}
 
 preload_capture_line_default_sixbits_16bpp:
+        ldr    r0, =palette_data_16
+        mov    r1, #64
+preload_loop:
+        ldr    r2, [r0], #4
+        subs   r1, r1, #1
+        bne    preload_loop
         SETUP_DUMMY_PARAMETERS
         b       capture_line_default_sixbits_16bpp
+
+        .ltorg
